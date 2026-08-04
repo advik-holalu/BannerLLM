@@ -10,6 +10,21 @@ _ALLOWED_FOLDERS = {"skus", "design_elements", "references", "generated", "brand
 _SAFE_SEGMENT = re.compile(r"[a-z0-9_]+")
 
 
+def _service_account_info() -> dict | None:
+    """Return the inline [gcp_service_account] secret as a dict, or None.
+
+    Uses the documented `"key" in st.secrets` / `st.secrets["key"]` access,
+    which reliably descends into a [section] on Streamlit Cloud (unlike
+    Secrets.get(), which can return None for a section).
+    """
+    try:
+        if "gcp_service_account" in st.secrets:
+            return dict(st.secrets["gcp_service_account"])
+    except Exception:
+        pass
+    return None
+
+
 def _storage_client() -> storage.Client:
     """Build a GCS client from credentials that work in both environments.
 
@@ -17,18 +32,19 @@ def _storage_client() -> storage.Client:
     Cloud, where there is no local key file), and falls back to the
     GCP_KEY_PATH JSON key file for local development.
     """
-    secrets = st.secrets
-
     # Preferred: inline service-account credentials (Streamlit Cloud).
-    service_account_info = secrets.get("gcp_service_account")
+    # When present, build the client and RETURN immediately — the local
+    # key-file check below is NEVER reached in this branch.
+    service_account_info = _service_account_info()
     if service_account_info:
         creds = service_account.Credentials.from_service_account_info(
-            dict(service_account_info)
+            service_account_info
         )
         return storage.Client(credentials=creds, project=creds.project_id)
 
-    # Fallback: service-account JSON key file on disk (local dev).
-    key_path = secrets.get("GCP_KEY_PATH")
+    # Fallback: service-account JSON key file on disk (local dev). Only reached
+    # when there is NO gcp_service_account secret.
+    key_path = st.secrets.get("GCP_KEY_PATH")
     if not key_path:
         raise RuntimeError(
             "Set either a [gcp_service_account] section or GCP_KEY_PATH in "

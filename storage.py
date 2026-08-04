@@ -2,6 +2,7 @@ import os
 import re
 import streamlit as st
 from google.cloud import storage
+from google.oauth2 import service_account
 
 _ALLOWED_FOLDERS = {"skus", "design_elements", "references", "generated", "brand", "platforms"}
 
@@ -9,20 +10,42 @@ _ALLOWED_FOLDERS = {"skus", "design_elements", "references", "generated", "brand
 _SAFE_SEGMENT = re.compile(r"[a-z0-9_]+")
 
 
-def _bucket() -> storage.bucket.Bucket:
+def _storage_client() -> storage.Client:
+    """Build a GCS client from credentials that work in both environments.
+
+    Prefers an inline [gcp_service_account] secret section (used on Streamlit
+    Cloud, where there is no local key file), and falls back to the
+    GCP_KEY_PATH JSON key file for local development.
+    """
     secrets = st.secrets
+
+    # Preferred: inline service-account credentials (Streamlit Cloud).
+    service_account_info = secrets.get("gcp_service_account")
+    if service_account_info:
+        creds = service_account.Credentials.from_service_account_info(
+            dict(service_account_info)
+        )
+        return storage.Client(credentials=creds, project=creds.project_id)
+
+    # Fallback: service-account JSON key file on disk (local dev).
     key_path = secrets.get("GCP_KEY_PATH")
-    bucket_name = secrets.get("GCS_BUCKET_NAME")
-    if not key_path or not bucket_name:
+    if not key_path:
         raise RuntimeError(
-            "GCP_KEY_PATH and GCS_BUCKET_NAME must be set in Streamlit secrets."
+            "Set either a [gcp_service_account] section or GCP_KEY_PATH in "
+            "Streamlit secrets."
         )
     if not os.path.exists(key_path):
         raise RuntimeError(
             f"GCP key file not found at {key_path}. Make sure the path in secrets is correct."
         )
-    client = storage.Client.from_service_account_json(key_path)
-    return client.bucket(bucket_name)
+    return storage.Client.from_service_account_json(key_path)
+
+
+def _bucket() -> storage.bucket.Bucket:
+    bucket_name = st.secrets.get("GCS_BUCKET_NAME")
+    if not bucket_name:
+        raise RuntimeError("GCS_BUCKET_NAME must be set in Streamlit secrets.")
+    return _storage_client().bucket(bucket_name)
 
 
 def _normalize_folder(folder: str) -> str:

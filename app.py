@@ -5,6 +5,7 @@ The main screen your growth + design team uses.
 Run locally:   streamlit run app.py
 """
 
+import hmac
 import time
 import streamlit as st
 
@@ -179,6 +180,47 @@ _init_state()
 
 
 # ----------------------------------------------------------------------------
+# Password gate
+# The password is read from st.secrets (key APP_PASSWORD) — NEVER hardcoded —
+# so it stays out of the repo, exactly like the API keys.
+# ----------------------------------------------------------------------------
+def _expected_password() -> str | None:
+    try:
+        return st.secrets.get("APP_PASSWORD")
+    except Exception:
+        # No secrets file configured at all.
+        return None
+
+
+def _render_login() -> None:
+    st.title("GO Desi Banner Studio")
+    expected = _expected_password()
+    if not expected:
+        st.error(
+            "APP_PASSWORD is not set. Add APP_PASSWORD to your Streamlit secrets "
+            "(.streamlit/secrets.toml locally, and the Streamlit Cloud secrets "
+            "when deployed) to enable access."
+        )
+        return
+
+    st.caption("Enter the password to continue.")
+    with st.form("login_form"):
+        password = st.text_input("Password", type="password")
+        submitted = st.form_submit_button("Enter", type="primary", use_container_width=True)
+    if submitted:
+        if hmac.compare_digest(password, expected):
+            st.session_state["authenticated"] = True
+            st.rerun()
+        else:
+            st.error("Incorrect password.")
+
+
+if not st.session_state.get("authenticated"):
+    _render_login()
+    st.stop()  # Nothing below (sidebar, screens) renders until authenticated.
+
+
+# ----------------------------------------------------------------------------
 # Sidebar
 # ----------------------------------------------------------------------------
 with st.sidebar:
@@ -209,6 +251,10 @@ with st.sidebar:
     if st.button("Refresh assets", type="primary", use_container_width=True):
         st.cache_data.clear()
         st.cache_resource.clear()
+        st.rerun()
+
+    if st.button("Log out", type="secondary", use_container_width=True):
+        st.session_state.pop("authenticated", None)
         st.rerun()
 
 

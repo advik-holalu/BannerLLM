@@ -6,7 +6,6 @@ Run locally:   streamlit run app.py
 """
 
 import hmac
-import time
 import streamlit as st
 
 import assets
@@ -199,6 +198,8 @@ def _init_state():
     st.session_state.setdefault("cached_variant_images", {})
     st.session_state.setdefault("cached_design_elements", {})
     st.session_state.setdefault("cached_reference_images", {})
+    st.session_state.setdefault("gallery_platform", None)
+    st.session_state.setdefault("gallery_page", 0)
 
 
 
@@ -253,7 +254,7 @@ with st.sidebar:
     st.markdown("### GO Desi Banner Studio")
     # Simple button-based navigation to make the sidebar feel intentional
     st.session_state.setdefault("screen_mode", "Create banner")
-    for label in ["Create banner", "Manage Products", "Rules & Assets"]:
+    for label in ["Create banner", "Gallery", "Manage Products", "Rules & Assets"]:
         is_active = st.session_state.get("screen_mode") == label
         # Active tab renders red (primary); the others render as normal buttons.
         if st.button(
@@ -418,16 +419,13 @@ def screen_create():
                 )
                 img = engine.generate_from_payload(payload["brief"], payload["images"])
                 st.session_state.last_brief = payload["brief"]
-                stamp = int(time.time())
-                base_name = assets.sku_image_filename(sku, variant, ext="")
 
                 st.session_state.current_image = img
                 # Start a fresh conversation thread with this banner.
                 initial_prompt = user_prompt.strip() or f"Generate a banner for {sku}."
                 st.session_state.thread = [{"prompt": initial_prompt, "image": img}]
-                storage.upload_image(
-                    "generated", f"{base_name}_{stamp}.png", img, content_type="image/png"
-                )
+                # Save grouped by platform so the Gallery can drill down by platform.
+                assets.save_generated_banner(platform or "", sku, variant, img)
                 st.success("Banner generated and saved to cloud storage.")
             except Exception as exc:
                 st.error(f"Generation failed: {exc}")
@@ -486,6 +484,105 @@ def screen_create():
                     st.rerun()
                 except Exception as exc:
                     st.error(f"Edit failed: {exc}")
+
+
+# ============================================================================
+# SCREEN 1b — GALLERY
+# ============================================================================
+_GALLERY_PAGE_SIZE = 12
+
+
+def screen_gallery():
+    st.title("Gallery")
+    index = assets.load_generated_index()
+    selected = st.session_state.get("gallery_platform")
+
+    # --- Top level: platform cards with counts ---
+    if not selected:
+        st.caption("Past generated banners, grouped by platform. Newest first.")
+        if not index:
+            st.info("No banners generated yet.")
+            return
+        per_row = 3
+        for i in range(0, len(index), per_row):
+            cols = st.columns(per_row)
+            for col, bucket in zip(cols, index[i : i + per_row]):
+                with col:
+                    with st.container(border=True):
+                        st.subheader(bucket["label"])
+                        n = bucket["count"]
+                        st.caption(f"{n} banner{'s' if n != 1 else ''}")
+                        if st.button(
+                            "View",
+                            key=_widget_key("gal_view", bucket["slug"]),
+                            type="primary",
+                            use_container_width=True,
+                            disabled=n == 0,
+                        ):
+                            st.session_state.gallery_platform = bucket["slug"]
+                            st.session_state.gallery_page = 0
+                            st.rerun()
+        return
+
+    # --- Platform level: paginated grid of that platform's banners ---
+    bucket = next((b for b in index if b["slug"] == selected), None)
+    if st.button("< back to platforms", key="gallery_back", type="secondary"):
+        st.session_state.gallery_platform = None
+        st.session_state.gallery_page = 0
+        st.rerun()
+    if bucket is None or not bucket["items"]:
+        st.markdown(f"### {bucket['label'] if bucket else selected}")
+        st.info("No banners for this platform yet.")
+        return
+
+    st.markdown(f"### {bucket['label']}")
+    items = bucket["items"]  # already newest-first
+    total_pages = (len(items) + _GALLERY_PAGE_SIZE - 1) // _GALLERY_PAGE_SIZE
+    page = max(0, min(st.session_state.get("gallery_page", 0), total_pages - 1))
+    start = page * _GALLERY_PAGE_SIZE
+    page_items = items[start : start + _GALLERY_PAGE_SIZE]
+
+    per_row = 3
+    for i in range(0, len(page_items), per_row):
+        cols = st.columns(per_row)
+        for col, item in zip(cols, page_items[i : i + per_row]):
+            with col:
+                with st.container(border=True):
+                    data = assets.load_generated_image(item["folder"], item["file"])
+                    if not data:
+                        st.caption("(image unavailable)")
+                        continue
+                    st.image(data, use_container_width=True)
+                    st.download_button(
+                        "Download",
+                        data=data,
+                        file_name=item["file"],
+                        mime="image/png",
+                        key=_widget_key("gal_dl", item["folder"], item["file"]),
+                        type="primary",
+                        use_container_width=True,
+                    )
+                    if _confirm_delete(
+                        _widget_key("gal_del", item["folder"], item["file"]),
+                        "Remove this banner?",
+                        label="Remove",
+                    ):
+                        assets.delete_generated_banner(item["folder"], item["file"])
+                        st.toast("Banner removed.")
+                        st.rerun()
+
+    if total_pages > 1:
+        p1, p2, p3 = st.columns([1, 2, 1])
+        with p1:
+            if page > 0 and st.button("Previous", key="gallery_prev", use_container_width=True):
+                st.session_state.gallery_page = page - 1
+                st.rerun()
+        with p2:
+            st.caption(f"Page {page + 1} of {total_pages}")
+        with p3:
+            if page < total_pages - 1 and st.button("Next", key="gallery_next", use_container_width=True):
+                st.session_state.gallery_page = page + 1
+                st.rerun()
 
 
 # ============================================================================
@@ -1176,6 +1273,8 @@ def screen_rules():
 screen_mode = st.session_state.get("screen_mode", "Create banner")
 if screen_mode == "Create banner":
     screen_create()
+elif screen_mode == "Gallery":
+    screen_gallery()
 elif screen_mode == "Manage Products":
     screen_manage()
 else:

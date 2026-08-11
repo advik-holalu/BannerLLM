@@ -118,6 +118,31 @@ def list_images(folder: str) -> list[str]:
     return sorted(names)
 
 
+def list_blobs_meta(folder: str) -> list[dict]:
+    """List blobs under a folder with lightweight metadata in a SINGLE GCS call.
+
+    Returns [{"name": <path relative to folder>, "updated": <epoch float>,
+    "size": <int>}]. `name` may contain a sub-path (e.g. "blinkit/x.png").
+    Metadata (updated/size) comes back with the listing — no per-blob fetch.
+    """
+    bucket = _bucket()
+    prefix = _normalize_folder(folder)
+    out = []
+    for blob in bucket.list_blobs(prefix=prefix):
+        if blob.name.endswith("/"):
+            continue
+        name = blob.name[len(prefix):]
+        if not name:
+            continue
+        updated = getattr(blob, "updated", None)
+        out.append({
+            "name": name,
+            "updated": updated.timestamp() if updated else 0.0,
+            "size": blob.size or 0,
+        })
+    return out
+
+
 def delete_image(folder: str, filename: str) -> bool:
     bucket = _bucket()
     blob = bucket.blob(_blob_name(folder, filename))

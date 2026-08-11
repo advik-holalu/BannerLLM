@@ -5,6 +5,7 @@ assets.py — helper functions for catalog, rule persistence, and cloud-backed i
 import json
 import os
 import re
+import time
 from pathlib import Path
 
 import streamlit as st
@@ -711,3 +712,92 @@ def load_sku_image(sku: str, variant: str | None = None) -> bytes | None:
         if Path(name).stem.startswith(f"{target}__"):
             return storage.get_image("skus", name)
     return None
+
+
+# ---------------------------------------------------------------------------
+# Generated banners (Gallery)
+#
+# GCS layout:
+#   generated/<platform-slug>/<product-slug>[__<variant-slug>]_<ms>.png
+# Older banners saved before per-platform organisation live directly in
+# generated/<file> and surface under the "Uncategorized" bucket.
+# ---------------------------------------------------------------------------
+_GENERATED_FOLDER = "generated"
+_UNCATEGORIZED = "uncategorized"
+
+
+def _generated_subfolder(platform_slug: str) -> str:
+    return f"{_GENERATED_FOLDER}/{platform_slug}"
+
+
+def save_generated_banner(platform: str, sku: str, variant: str | None, data: bytes) -> None:
+    """Save a generated banner grouped by platform, newest identifiable by name."""
+    slug = _slug(platform) if platform else _UNCATEGORIZED
+    base = _sku_image_basename(sku, variant)
+    filename = f"{base}_{int(time.time() * 1000)}.png"
+    storage.upload_image(_generated_subfolder(slug), filename, data, content_type="image/png")
+    load_generated_index.clear()
+
+
+@st.cache_data(show_spinner=False)
+def load_generated_index() -> list[dict]:
+    """Generated banners grouped by platform for the Gallery (one GCS list call).
+
+    Returns ordered buckets: current platforms first (even if empty), then any
+    orphan slugs, then "Uncategorized" last. Each bucket:
+        {"slug", "label", "count", "items": [{"folder","file","updated"} ...]}
+    with items sorted newest-first.
+    """
+    meta = storage.list_blobs_meta(_GENERATED_FOLDER)
+    groups: dict[str, list] = {}
+    for entry in meta:
+        parts = entry["name"].split("/")
+        if len(parts) == 1:
+            slug, file = _UNCATEGORIZED, parts[0]
+            folder = _GENERATED_FOLDER
+        else:
+            slug, file = parts[0], parts[-1]
+            folder = _GENERATED_FOLDER + "/" + "/".join(parts[:-1])
+        groups.setdefault(slug, []).append(
+            {"folder": folder, "file": file, "updated": entry["updated"]}
+        )
+
+    def _sorted(items: list) -> list:
+        return sorted(items, key=lambda x: x["updated"], reverse=True)
+
+    platforms = load_platforms()
+    slug_to_label = {_slug(p): p for p in platforms}
+
+    ordered: list[dict] = []
+    seen: set[str] = set()
+    for p in platforms:
+        s = _slug(p)
+        items = _sorted(groups.get(s, []))
+        ordered.append({"slug": s, "label": p, "count": len(items), "items": items})
+        seen.add(s)
+    for s, its in groups.items():
+        if s in seen or s == _UNCATEGORIZED:
+            continue
+        items = _sorted(its)
+        label = slug_to_label.get(s) or s.replace("_", " ").title()
+        ordered.append({"slug": s, "label": label, "count": len(items), "items": items})
+        seen.add(s)
+    if groups.get(_UNCATEGORIZED):
+        items = _sorted(groups[_UNCATEGORIZED])
+        ordered.append(
+            {"slug": _UNCATEGORIZED, "label": "Uncategorized", "count": len(items), "items": items}
+        )
+    return ordered
+
+
+@st.cache_data(show_spinner=False)
+def load_generated_image(folder: str, file: str) -> bytes | None:
+    """Fetch one generated banner's bytes (cached per blob so reruns are free)."""
+    return storage.get_image(folder, file)
+
+
+def delete_generated_banner(folder: str, file: str) -> bool:
+    deleted = storage.delete_image(folder, file)
+    load_generated_index.clear()
+    load_generated_image.clear()
+    return deleted

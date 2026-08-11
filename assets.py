@@ -343,13 +343,13 @@ _LOGO_NOTES_FILE = "logo_notes.txt"
 
 # Shown until the team saves their own logo notes.
 _DEFAULT_LOGO_NOTES = (
-    "Noor rule: ONLY the circular disc BEHIND the logo changes colour to "
-    "complement the banner — adapt that disc per banner. The logo mark itself "
-    "(the wordmark letters and the starburst) NEVER changes colour: keep it "
-    "exactly as provided, starburst orange #FF8700. Never recolour, restyle, "
-    "distort, or redraw the logo mark. When the logo is used, prefer the top "
-    "with clear space around it, at a consistent size (PLACEHOLDER: exact size "
-    "pending from Priyanka) — but only if it doesn't crowd the design."
+    "Place the GO DESi logo mark cleanly, with no added circle, disc, or shape "
+    "behind it. Reproduce the logo mark exactly as provided; never recolour or "
+    "alter it. The logo mark (the wordmark letters and the starburst) keeps its "
+    "exact original colours, starburst orange #FF8700. When the logo is used, "
+    "prefer the top with clear space around it, at a consistent size "
+    "(PLACEHOLDER: exact size pending from Priyanka) — but only if it doesn't "
+    "crowd the design."
 )
 
 

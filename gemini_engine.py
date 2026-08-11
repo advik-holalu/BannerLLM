@@ -133,8 +133,8 @@ def build_brief(
             "sacred: reproduce it exactly, keeping its original colours (starburst "
             "orange #FF8700). Never recolour, restyle, distort, stretch, rotate, "
             "or redraw the logo mark — do NOT tint it to match the background. "
-            "ONLY the circular disc behind the logo may change colour to suit the "
-            "banner. Keep clear space around the logo.\n"
+            "Place the logo mark cleanly, with no added circle, disc, or shape "
+            "behind it. Keep clear space around the logo.\n"
         )
         if logo_notes.strip():
             brief += f"Logo usage notes:\n{logo_notes.strip()}\n"

@@ -12,11 +12,35 @@ import streamlit as st
 import assets
 import config
 import gemini_engine as engine
+import imaging
 import storage
 
 
 def _widget_key(*parts: str) -> str:
     return "__".join(part.replace(" ", "_").lower() for part in parts)
+
+
+# On-screen preview is scaled down so the whole banner fits on a laptop screen.
+# Downloads always use the original full-resolution bytes — only display scales.
+PREVIEW_MAX_HEIGHT = 640
+PREVIEW_MAX_WIDTH = 680
+
+
+def _preview_width(w: int, h: int) -> int:
+    """Display width (px) that keeps the whole banner visible without scrolling,
+    capping height to PREVIEW_MAX_HEIGHT and width to PREVIEW_MAX_WIDTH."""
+    if not h:
+        return PREVIEW_MAX_WIDTH
+    by_height = round(PREVIEW_MAX_HEIGHT * w / h)
+    return max(1, min(by_height, PREVIEW_MAX_WIDTH))
+
+
+def _show_preview(data: bytes, w: int | None = None, h: int | None = None, caption=None) -> None:
+    """Render a scaled-down preview (aspect ratio preserved). Never affects the
+    downloaded file, which stays full resolution."""
+    if w is None or h is None:
+        w, h = imaging.dimensions(data)
+    st.image(data, caption=caption, width=_preview_width(w, h))
 
 
 def _file_sig(upload) -> str:
@@ -65,11 +89,11 @@ def _confirm_delete(prefix: str, confirm_msg: str, label: str = "Delete") -> boo
             st.rerun()
         return False
 
-    st.warning(confirm_msg)
-    if st.button("Confirm delete", key=f"{prefix}__yes", type="primary", use_container_width=True):
+    st.warning(f"{confirm_msg} This can't be undone.")
+    if st.button("Yes, delete", key=f"{prefix}__yes", type="primary", use_container_width=True):
         st.session_state.pop(state_key, None)
         return True
-    if st.button("Cancel", key=f"{prefix}__no", type="primary", use_container_width=True):
+    if st.button("Cancel", key=f"{prefix}__no", type="secondary", use_container_width=True):
         st.session_state.pop(state_key, None)
         st.rerun()
     return False
@@ -132,10 +156,10 @@ def _list_row(
                 else:
                     delete_confirmed = True
         if st.session_state.get(armed_key):
-            st.warning(confirm_msg)
+            st.warning(f"{confirm_msg} This can't be undone.")
             c1, c2 = st.columns(2)
             with c1:
-                if st.button("Confirm delete", key=f"{delete_key}__yes", type="primary", use_container_width=True):
+                if st.button("Yes, delete", key=f"{delete_key}__yes", type="primary", use_container_width=True):
                     st.session_state.pop(armed_key, None)
                     delete_confirmed = True
             with c2:
@@ -160,7 +184,9 @@ st.set_page_config(
 
 def _init_state():
     st.session_state.setdefault("current_image", None)
-    st.session_state.setdefault("history", [])
+    # Conversation thread for the session: list of
+    # {"prompt": str, "image": bytes} rounds, newest last.
+    st.session_state.setdefault("thread", [])
     st.session_state.setdefault("last_brief", "")
     st.session_state.setdefault("manage_nav_level", "categories")
     st.session_state.setdefault("manage_selected_category", None)
@@ -302,8 +328,12 @@ def screen_create():
     # A platform is ALWAYS selected (defaults to the first, e.g. Blinkit) so the
     # Order Now button is never skipped for lack of a chosen platform.
     platform = st.selectbox("Platform", platforms, index=0) if platforms else None
+    no_button = assets.load_platform_no_button(platform) if platform else False
     platform_button = assets.load_platform_button(platform) if platform else None
-    if platform and platform_button:
+
+    if platform and no_button:
+        st.caption(f"{platform} uses its own CTA — no Order Now button is added to the banner.")
+    elif platform and platform_button:
         st.caption(f"The {platform} Order Now button will be placed on the banner.")
     elif platform:
         st.caption(
@@ -311,8 +341,15 @@ def screen_create():
             "Rules & Assets → Platforms, or its notes will still be applied."
         )
 
-    size_label = st.selectbox("Banner size", list(config.BANNER_SIZES.keys()))
-    dimensions = config.BANNER_SIZES[size_label]
+    # Some platforms (e.g. Meta) are pinned to a fixed size — the selector is
+    # hidden and one banner is generated at that size. Others use the selector.
+    fixed_size = assets.platform_fixed_size(platform) if platform else None
+    if fixed_size:
+        size_label, dimensions = fixed_size
+        st.caption(f"{platform} banners are generated at {dimensions[0]}x{dimensions[1]} ({size_label}).")
+    else:
+        size_label = st.selectbox("Banner size", list(config.BANNER_SIZES.keys()))
+        dimensions = config.BANNER_SIZES[size_label]
 
     st.markdown("**What should the banner look like?**")
     template_choice = st.selectbox(
@@ -376,58 +413,79 @@ def screen_create():
                     platform=platform or "",
                     platform_notes=platform_notes,
                     platform_button=platform_button,
+                    no_button=no_button,
                     design_elements_bw=config.DESIGN_ELEMENTS_ARE_BW,
                 )
                 img = engine.generate_from_payload(payload["brief"], payload["images"])
-                st.session_state.current_image = img
-                st.session_state.history = [img]
                 st.session_state.last_brief = payload["brief"]
-                filename = f"{assets.sku_image_filename(sku, variant, ext='.png')}_{int(time.time())}.png"
-                storage.upload_image("generated", filename, img, content_type="image/png")
+                stamp = int(time.time())
+                base_name = assets.sku_image_filename(sku, variant, ext="")
+
+                st.session_state.current_image = img
+                # Start a fresh conversation thread with this banner.
+                initial_prompt = user_prompt.strip() or f"Generate a banner for {sku}."
+                st.session_state.thread = [{"prompt": initial_prompt, "image": img}]
+                storage.upload_image(
+                    "generated", f"{base_name}_{stamp}.png", img, content_type="image/png"
+                )
                 st.success("Banner generated and saved to cloud storage.")
             except Exception as exc:
                 st.error(f"Generation failed: {exc}")
 
-    if st.session_state.current_image:
+    sku_slug = sku.replace(" ", "_").lower()
+
+    # The session as a scrolling conversation thread. Each round
+    # shows the user's prompt/instruction, then the resulting banner (capped
+    # preview) with its own full-resolution download. New rounds append below.
+    thread = st.session_state.get("thread") or []
+    if thread:
         st.divider()
-        st.image(st.session_state.current_image, caption="Latest version", use_container_width=True)
-        st.download_button(
-            "Download PNG",
-            data=st.session_state.current_image,
-            file_name=f"godesi_{sku.replace(' ', '_').lower()}.png",
-            mime="image/png",
-            type="primary",
-            use_container_width=True,
-        )
+        st.markdown("**Session**")
+        last_index = len(thread) - 1
+        for index, round_ in enumerate(thread):
+            # User prompt — right-aligned bubble (offset into the right columns).
+            _, user_col = st.columns([1, 3])
+            with user_col:
+                with st.container(border=True):
+                    st.markdown(round_["prompt"])
+            # AI banner — left-aligned (full width; the capped preview sits left).
+            caption = "Latest version" if index == last_index else f"Version {index + 1}"
+            _show_preview(round_["image"], caption=caption)
+            st.download_button(
+                "Download PNG",
+                data=round_["image"],
+                file_name=f"godesi_{sku_slug}_v{index + 1}.png",
+                mime="image/png",
+                key=_widget_key("dl_round", str(index)),
+                type="primary",
+                use_container_width=True,
+            )
 
         st.markdown("**Refine the banner**")
-        edit = st.text_input(
-            "Refine",
-            placeholder="Describe a change, for example make the layout cleaner or increase product prominence.",
-            label_visibility="collapsed",
-        )
-        c1, c2 = st.columns(2)
-        with c1:
-            if st.button("Apply change", type="primary", use_container_width=True) and edit.strip():
-                with st.spinner("Applying the edit..."):
-                    try:
-                        new_img = engine.edit_banner(st.session_state.current_image, edit)
-                        st.session_state.current_image = new_img
-                        st.session_state.history.append(new_img)
-                        st.rerun()
-                    except Exception as exc:
-                        st.error(f"Edit failed: {exc}")
-        with c2:
-            if len(st.session_state.history) > 1 and st.button("Undo last change", type="primary", use_container_width=True):
-                st.session_state.history.pop()
-                st.session_state.current_image = st.session_state.history[-1]
-                st.rerun()
-
-        if len(st.session_state.history) > 1:
-            st.caption("Versions")
-            cols = st.columns(min(len(st.session_state.history), 5))
-            for index, (col, image_data) in enumerate(zip(cols, st.session_state.history)):
-                col.image(image_data, caption=f"v{index + 1}", use_container_width=True)
+        st.caption("Refinements apply to the most recent banner and append a new round below.")
+        in_col, send_col = st.columns([6, 1], vertical_alignment="bottom")
+        with in_col:
+            edit = st.text_input(
+                "Refine",
+                placeholder="Describe a change, for example make the layout cleaner or increase product prominence.",
+                label_visibility="collapsed",
+            )
+        with send_col:
+            send = st.button(
+                "Send",
+                icon=":material/send:",
+                type="primary",
+                use_container_width=True,
+            )
+        if send and edit.strip():
+            with st.spinner("Applying the edit..."):
+                try:
+                    new_img = engine.edit_banner(thread[-1]["image"], edit)
+                    st.session_state.thread.append({"prompt": edit.strip(), "image": new_img})
+                    st.session_state.current_image = new_img
+                    st.rerun()
+                except Exception as exc:
+                    st.error(f"Edit failed: {exc}")
 
 
 # ============================================================================
@@ -485,8 +543,12 @@ def _manage_level_categories(catalog: dict) -> None:
             subtitle=f"{sku_count} product{'s' if sku_count != 1 else ''}",
             view_key=f"{prefix}__view",
             delete_key=f"{prefix}__del",
-            needs_confirm=sku_count > 0,  # confirm only when it holds products
-            confirm_msg=f"Delete '{category}' and its {sku_count} product(s)?",
+            needs_confirm=True,
+            confirm_msg=(
+                f"Delete '{category}' and its {sku_count} product(s)?"
+                if sku_count
+                else f"Delete category '{category}'?"
+            ),
         )
         if view_clicked:
             st.session_state.manage_nav_level = "category"
@@ -620,7 +682,8 @@ def _manage_level_sku(catalog: dict) -> None:
             name=variant,
             view_key=f"{prefix}__view",
             delete_key=f"{prefix}__del",
-            needs_confirm=False,  # a variant is a single image — direct remove
+            needs_confirm=True,
+            confirm_msg=f"Delete variant '{variant}' and its image?",
         )
         if view_clicked:
             st.session_state.manage_nav_level = "variant"
@@ -654,8 +717,11 @@ def _manage_level_variant(catalog: dict) -> None:
             st.rerun()
 
     st.markdown(f"### {variant}")
-    # A variant is a single image — direct delete is fine.
-    if st.button("Delete Variant", key="del_variant_detail", type="primary", use_container_width=True):
+    if _confirm_delete(
+        _widget_key("del_variant_detail", category, sku, variant),
+        f"Delete variant '{variant}' and its image?",
+        label="Delete Variant",
+    ):
         variant_list = catalog[category][sku]["variants"]
         variant_list.remove(variant)
         catalog[category][sku]["variants"] = variant_list
@@ -685,20 +751,21 @@ def _manage_sku_image_section(sku: str, variant: str | None, category: str, cata
         if cache_key not in st.session_state.cached_sku_images:
             st.session_state.cached_sku_images[cache_key] = current_image
 
-        col1, col2 = st.columns([3, 1])
-        with col1:
-            st.image(current_image, caption="Current image", use_container_width=True)
-        with col2:
-            if st.button("Remove", key=_widget_key("remove_img", section_key), type="primary", use_container_width=True):
-                deleted = assets.delete_sku_image(sku, variant)
-                st.cache_data.clear()
-                if deleted:
-                    st.session_state.cached_sku_images.pop(cache_key, None)
-                    st.session_state[file_id_key] = None
-                    st.toast("Image removed.")
-                else:
-                    st.error("Image not found or deletion failed.")
-                st.rerun()
+        st.image(current_image, caption="Current image", use_container_width=True)
+        if _confirm_delete(
+            _widget_key("remove_img", section_key),
+            "Remove this image?",
+            label="Remove",
+        ):
+            deleted = assets.delete_sku_image(sku, variant)
+            st.cache_data.clear()
+            if deleted:
+                st.session_state.cached_sku_images.pop(cache_key, None)
+                st.session_state[file_id_key] = None
+                st.toast("Image removed.")
+            else:
+                st.error("Image not found or deletion failed.")
+            st.rerun()
     else:
         st.caption("No image uploaded yet.")
 
@@ -797,11 +864,10 @@ def _style_references_tab() -> None:
                     ):
                         assets.set_reference_note(category, name, new_note)
                         st.success("Note saved.")
-                    if st.button(
-                        "Remove",
-                        key=_widget_key("ref_remove", category, name),
-                        type="primary",
-                        use_container_width=True,
+                    if _confirm_delete(
+                        _widget_key("ref_remove", category, name),
+                        "Remove this style reference?",
+                        label="Remove",
                     ):
                         deleted = assets.delete_reference_image(category, name)
                         st.session_state["cached_reference_images"].pop(cache_key, None)
@@ -847,21 +913,36 @@ def _platforms_tab() -> None:
     st.divider()
     platform = st.selectbox("Platform", platforms, key="platform_admin_select")
 
+    current_no_button = assets.load_platform_no_button(platform)
+    no_button_val = st.checkbox(
+        "No Order Now button (this platform uses its own CTA)",
+        value=current_no_button,
+        key=_widget_key("platform_no_button", platform),
+        help="When on, generated banners for this platform never bake in an Order Now button.",
+    )
+    if no_button_val != current_no_button:
+        assets.save_platform_no_button(platform, no_button_val)
+        st.toast("Saved.")
+        st.rerun()
+
     st.markdown("##### Order Now button")
+    if no_button_val:
+        st.caption("This platform is set to use its own CTA — any uploaded button below is ignored during generation.")
     button = assets.load_platform_button(platform)
     if button:
-        col1, col2 = st.columns([3, 1])
-        with col1:
-            st.image(button, caption=f"Current {platform} button", width=220)
-        with col2:
-            if st.button("Remove", key=_widget_key("remove_platform_btn", platform), type="primary", use_container_width=True):
-                deleted = assets.delete_platform_button(platform)
-                st.cache_data.clear()
-                if not deleted:
-                    st.error("Button not found or deletion failed.")
-                else:
-                    st.toast("Button removed.")
-                st.rerun()
+        st.image(button, caption=f"Current {platform} button", width=220)
+        if _confirm_delete(
+            _widget_key("remove_platform_btn", platform),
+            "Remove this Order Now button?",
+            label="Remove",
+        ):
+            deleted = assets.delete_platform_button(platform)
+            st.cache_data.clear()
+            if not deleted:
+                st.error("Button not found or deletion failed.")
+            else:
+                st.toast("Button removed.")
+            st.rerun()
         uploader_label = "Replace Order Now button"
     else:
         st.caption("No Order Now button uploaded yet.")
@@ -956,18 +1037,15 @@ def _logo_tab() -> None:
     )
     logo = assets.load_logo()
     if logo:
-        col1, col2 = st.columns([3, 1])
-        with col1:
-            st.image(logo, caption="Current brand logo", width=220)
-        with col2:
-            if st.button("Remove", key="remove_logo", type="primary", use_container_width=True):
-                deleted = assets.delete_logo()
-                st.cache_data.clear()
-                if not deleted:
-                    st.error("Logo not found or deletion failed.")
-                else:
-                    st.toast("Logo removed.")
-                st.rerun()
+        st.image(logo, caption="Current brand logo", width=220)
+        if _confirm_delete("remove_logo", "Remove the brand logo?", label="Remove"):
+            deleted = assets.delete_logo()
+            st.cache_data.clear()
+            if not deleted:
+                st.error("Logo not found or deletion failed.")
+            else:
+                st.toast("Logo removed.")
+            st.rerun()
         uploader_label = "Replace logo"
     else:
         st.caption("No logo uploaded yet.")
@@ -1053,11 +1131,10 @@ def _design_elements_tab() -> None:
                     ):
                         assets.set_design_element_label(name, new_label.strip())
                         st.success("Label saved.")
-                    if st.button(
-                        "Remove",
-                        key=_widget_key("remove_design", name),
-                        type="primary",
-                        use_container_width=True,
+                    if _confirm_delete(
+                        _widget_key("remove_design", name),
+                        "Remove this design element?",
+                        label="Remove",
                     ):
                         deleted = assets.delete_design_element(name)
                         st.session_state["cached_design_elements"].pop(cache_key, None)

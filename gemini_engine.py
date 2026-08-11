@@ -59,6 +59,7 @@ def build_brief(
     platform: str = "",
     platform_notes: str = "",
     has_button: bool = False,
+    no_button: bool = False,
     design_elements_bw: bool = False,
     has_design_elements: bool = False,
 ) -> str:
@@ -140,7 +141,14 @@ def build_brief(
         brief += "\n"
     if platform:
         brief += f"=== {platform.upper()} ORDER NOW BUTTON ===\n"
-        if has_button:
+        if no_button:
+            brief += (
+                f"Do NOT place any Order Now button or CTA button on this banner. "
+                f"{platform} supplies its own call-to-action outside the creative, "
+                "so the banner must not bake in any button — leave it out "
+                "entirely.\n"
+            )
+        elif has_button:
             brief += (
                 f"The official {platform} Order Now button is attached as a "
                 "reference image.\n"
@@ -158,7 +166,7 @@ def build_brief(
                 "Follow the rules below — typically leave clean, empty space so a "
                 "designer can drop in the official button afterwards.\n"
             )
-        if platform_notes.strip():
+        if platform_notes.strip() and not no_button:
             brief += f"{platform} button rules to follow exactly:\n{platform_notes.strip()}\n"
         brief += "\n"
     if has_design_elements:
@@ -211,6 +219,7 @@ def assemble_payload(
     platform: str,
     platform_notes: str,
     platform_button: bytes | None,
+    no_button: bool = False,
     design_elements_bw: bool = True,
 ) -> dict:
     """Build the brief + labelled image list for one generation.
@@ -221,6 +230,8 @@ def assemble_payload(
     # When the logo toggle is OFF, do not send the logo image at all — the brief
     # tells the model to use only the pack's printed logo.
     send_logo = logo_image if include_logo else None
+    # When the platform bakes in no button, never send the button image.
+    send_button = None if no_button else platform_button
 
     brief = build_brief(
         brand_rules,
@@ -236,7 +247,8 @@ def assemble_payload(
         include_logo=include_logo,
         platform=platform,
         platform_notes=platform_notes,
-        has_button=bool(platform_button),
+        has_button=bool(send_button),
+        no_button=no_button,
         design_elements_bw=design_elements_bw,
         has_design_elements=bool(design_elements),
     )
@@ -250,8 +262,8 @@ def assemble_payload(
         essentials.append({"role": "Product shot", "label": product_label, "data": product_image})
     if send_logo:
         essentials.append({"role": "Logo", "label": "Brand logo", "data": send_logo})
-    if platform_button:
-        essentials.append({"role": "Platform button", "label": f"{platform} Order Now button", "data": platform_button})
+    if send_button:
+        essentials.append({"role": "Platform button", "label": f"{platform} Order Now button", "data": send_button})
 
     optional: list[dict] = []
     for label, data in list(reference_images)[: config.MAX_REFERENCES_PER_CALL]:

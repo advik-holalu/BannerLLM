@@ -208,6 +208,30 @@ DEFAULT_CATEGORIES = [
 DEFAULT_PLATFORMS = [
     "Blinkit",
     "Zepto",
+    "Meta / Instagram",
+]
+
+# ----------------------------------------------------------------------------
+# Per-platform FIXED SIZE. A platform listed here generates ONE banner at this
+# exact size — the "Banner size" selector is hidden on the Create screen and no
+# cropping happens. Each entry: (label, (width, height)).
+# Platforms NOT listed here use the "Banner size" selector (Blinkit, Zepto).
+# To pin another platform to a fixed size later, just add an entry here.
+# ----------------------------------------------------------------------------
+PLATFORM_FIXED_SIZE = {
+    # Meta feed testing: a single 4:5 banner.
+    "Meta / Instagram": ("4:5 feed (1080x1350)", (1080, 1350)),
+    # Example: pin Blinkit/Zepto too by filling their exact sizes:
+    # "Blinkit": ("Blinkit banner (208x520)", (208, 520)),
+    # "Zepto":   ("Zepto banner (WxH)", (1080, 1080)),
+}
+
+# Platforms whose banners must NOT bake in an Order Now / CTA button — the ad
+# platform supplies its own call-to-action. This is the DEFAULT "no Order Now
+# button" state (toggle ON) for these platforms; it can be overridden per
+# platform in Rules & Assets -> Platforms.
+NO_BUTTON_PLATFORMS = [
+    "Meta / Instagram",
 ]
 
 # Old default categories from earlier versions. Used ONLY during migration to

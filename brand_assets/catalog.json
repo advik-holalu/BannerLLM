@@ -2,10 +2,63 @@
   "Namkeen": {
     "Bombay Bhel": {
       "variants": []
+    },
+    "Mini Kachori": {
+      "variants": []
+    },
+    "Mini Samosa": {
+      "variants": []
+    },
+    "Spicy Lemon": {
+      "variants": []
+    },
+    "Chilli Pineapple": {
+      "variants": []
+    },
+    "Chapata Amla": {
+      "variants": []
+    },
+    "Jhalmuri": {
+      "variants": []
+    },
+    "Jhalmuri Murmura Combo": {
+      "variants": []
+    },
+    "Murmura": {
+      "variants": []
     }
   },
-  "Fruti Twist": {},
-  "DESi POPz": {},
+  "Fruti Twist": {
+    "Real Aam": {
+      "variants": []
+    }
+  },
+  "DESi POPz": {
+    "Tangy Imli": {
+      "variants": []
+    },
+    "Masala Jamun": {
+      "variants": []
+    },
+    "Real Aam and Strawberry": {
+      "variants": []
+    },
+    "Assorted": {
+      "variants": []
+    },
+    "Kaccha Aam": {
+      "variants": []
+    },
+    "Real Aam POPz": {
+      "variants": []
+    },
+    "Chilli Guava": {
+      "variants": []
+    },
+    "Chilli Orange": {
+      "variants": []
+    }
+  },
   "DESi Mints": {},
   "DESi Meetha": {
     "Dark Chocolate Kaju Katli": {
@@ -19,8 +72,27 @@
     },
     "Mysore Pak": {
       "variants": []
+    },
+    "Besan Laddoo": {
+      "variants": []
+    },
+    "Pista Coconut Burfi": {
+      "variants": []
+    },
+    "Classic Kaju Katli": {
+      "variants": []
+    },
+    "Milk Cake": {
+      "variants": []
+    },
+    "Badam Coconut burfi": {
+      "variants": []
+    },
+    "Kaju Kishmish Coconut Burfi": {
+      "variants": []
     }
   },
   "DESi Gifting": {},
-  "DESi Essentials": {}
+  "DESi Essentials": {},
+  "Fresh Sweets": {}
 }

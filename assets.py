@@ -401,6 +401,7 @@ def save_logo_notes(notes: str) -> None:
 _PLATFORM_REGISTRY_FILE = "registry.json"
 _PLATFORM_BUTTON_FILE = "order_now_button.png"
 _PLATFORM_NOTES_FILE = "notes.txt"
+_PLATFORM_NO_BUTTON_FILE = "no_button.txt"
 
 # Default button rules per platform slug (shown until the team saves their own).
 _DEFAULT_PLATFORM_NOTES = {
@@ -479,10 +480,38 @@ def delete_platform(name: str) -> bool:
     )
     storage.delete_image(platform_folder(name), _PLATFORM_BUTTON_FILE)
     storage.delete_image(platform_folder(name), _PLATFORM_NOTES_FILE)
+    storage.delete_image(platform_folder(name), _PLATFORM_NO_BUTTON_FILE)
     load_platforms.clear()
     load_platform_button.clear()
     load_platform_notes.clear()
+    load_platform_no_button.clear()
     return True
+
+
+def platform_fixed_size(platform: str) -> tuple | None:
+    """Fixed generation size for a platform as (label, (w, h)), or None if the
+    platform uses the manual Banner size selector."""
+    return config.PLATFORM_FIXED_SIZE.get(platform)
+
+
+@st.cache_data(show_spinner=False)
+def load_platform_no_button(platform: str) -> bool:
+    """Whether this platform must NOT bake in an Order Now button. Defaults to
+    the config NO_BUTTON_PLATFORMS list until the team overrides it in-app."""
+    data = storage.get_image(platform_folder(platform), _PLATFORM_NO_BUTTON_FILE)
+    if data is None:
+        return platform in config.NO_BUTTON_PLATFORMS
+    return data.decode("utf-8").strip() == "1"
+
+
+def save_platform_no_button(platform: str, no_button: bool) -> None:
+    storage.upload_image(
+        platform_folder(platform),
+        _PLATFORM_NO_BUTTON_FILE,
+        b"1" if no_button else b"0",
+        content_type="text/plain",
+    )
+    load_platform_no_button.clear()
 
 
 @st.cache_data(show_spinner=False)

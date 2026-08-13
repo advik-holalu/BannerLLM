@@ -663,55 +663,126 @@ def get_design_element_label(filename: str) -> str:
         return ""
 
 
+# ---------------------------------------------------------------------------
+# Product images — MULTIPLE per product/variant, each tagged with a role.
+#
+# GCS layout:
+#   skus/<product-slug>[__<variant-slug>]/<role>_<ms>.<ext>
+# Legacy single images stored directly at skus/<product-slug>[__<variant>].<ext>
+# are still recognised and surfaced as "Packaging".
+# ---------------------------------------------------------------------------
+SKU_IMAGE_ROLES = [
+    ("packaging", "Packaging"),
+    ("styling", "Styling / mood"),
+    ("pieces", "Product pieces"),
+]
+_SKU_ROLE_LABELS = dict(SKU_IMAGE_ROLES)
+_DEFAULT_SKU_ROLE = "packaging"
+
+
+def sku_role_label(role: str) -> str:
+    return _SKU_ROLE_LABELS.get(role, _SKU_ROLE_LABELS[_DEFAULT_SKU_ROLE])
+
+
 def sku_image_filename(sku: str, variant: str | None = None, ext: str = ".png") -> str:
     return _sku_image_basename(sku, variant) + ext
 
 
-def upload_sku_image(sku: str, variant: str | None, data: bytes, filename: str) -> None:
+def sku_image_folder(sku: str, variant: str | None = None) -> str:
+    return "skus/" + _sku_image_basename(sku, variant)
+
+
+def _role_from_filename(file: str) -> str:
+    prefix = Path(file).stem.split("_", 1)[0]
+    return prefix if prefix in _SKU_ROLE_LABELS else _DEFAULT_SKU_ROLE
+
+
+def _split_sku_name(name: str) -> tuple[str, str]:
+    """Split a name relative to 'skus/' into (folder, filename) for storage calls."""
+    if "/" in name:
+        sub, file = name.rsplit("/", 1)
+        return f"skus/{sub}", file
+    return "skus", name
+
+
+def _clear_sku_caches() -> None:
+    load_sku_image.clear()
+    list_sku_images.clear()
+    load_sku_image_data.clear()
+
+
+def upload_sku_image(sku: str, variant: str | None, data: bytes, filename: str, role: str = _DEFAULT_SKU_ROLE) -> None:
+    role = role if role in _SKU_ROLE_LABELS else _DEFAULT_SKU_ROLE
     ext = _file_extension(filename)
+    fname = f"{role}_{int(time.time() * 1000)}{ext}"
     storage.upload_image(
-        "skus",
-        sku_image_filename(sku, variant, ext),
+        sku_image_folder(sku, variant),
+        fname,
         data,
         content_type=_mime_type(ext),
     )
-    load_sku_image.clear()
+    _clear_sku_caches()
+
+
+@st.cache_data(show_spinner=False)
+def list_sku_images(sku: str, variant: str | None = None) -> list[dict]:
+    """Images for one product/variant: [{folder, file, role}] (legacy included)."""
+    base = _sku_image_basename(sku, variant)
+    entries: list[dict] = []
+    for name in sorted(storage.list_images("skus")):
+        if "/" in name:
+            folder0, _, file = name.partition("/")
+            if folder0 != base or "/" in file:
+                continue
+            if Path(file).suffix.lower() not in _IMAGE_EXTENSIONS:
+                continue
+            entries.append({"folder": f"skus/{base}", "file": file, "role": _role_from_filename(file)})
+        elif Path(name).stem == base and Path(name).suffix.lower() in _IMAGE_EXTENSIONS:
+            entries.append({"folder": "skus", "file": name, "role": _DEFAULT_SKU_ROLE})
+    return entries
+
+
+@st.cache_data(show_spinner=False)
+def load_sku_image_data(folder: str, file: str) -> bytes | None:
+    return storage.get_image(folder, file)
+
+
+def delete_sku_image_file(folder: str, file: str) -> bool:
+    """Delete one specific product image."""
+    deleted = storage.delete_image(folder, file)
+    _clear_sku_caches()
+    return deleted
 
 
 def delete_sku_image(sku: str, variant: str | None = None) -> bool:
+    """Delete ALL images for a product/variant. With variant=None this also
+    removes every variant's images (used when deleting a product or category)."""
+    base = _sku_image_basename(sku, variant) if variant else _slug(sku)
     deleted = False
     for name in storage.list_images("skus"):
-        stem = Path(name).stem
-        base = _sku_image_basename(sku, variant) if variant else _slug(sku)
-        if variant and stem == base:
-            deleted |= storage.delete_image("skus", name)
-        elif not variant and (stem == base or stem.startswith(f"{base}__")):
-            deleted |= storage.delete_image("skus", name)
-    load_sku_image.clear()
+        if "/" in name:
+            folder0 = name.split("/", 1)[0]
+            match = (folder0 == base) if variant else (folder0 == base or folder0.startswith(f"{base}__"))
+        else:
+            stem = Path(name).stem
+            match = (stem == base) if variant else (stem == base or stem.startswith(f"{base}__"))
+        if match:
+            deleted |= storage.delete_image(*_split_sku_name(name))
+    _clear_sku_caches()
     return deleted
 
 
 @st.cache_data(show_spinner=False)
 def load_sku_image(sku: str, variant: str | None = None) -> bytes | None:
-    names = set(storage.list_images("skus"))
-    if variant:
-        target = _sku_image_basename(sku, variant)
-        for ext in _IMAGE_EXTENSIONS:
-            filename = f"{target}{ext}"
-            if filename in names:
-                return storage.get_image("skus", filename)
+    """Backward-compatible single image (prefers Packaging, else first)."""
+    imgs = list_sku_images(sku, variant)
+    if not imgs and variant:
+        imgs = list_sku_images(sku)
+    if not imgs:
         return None
-
-    target = _sku_image_basename(sku)
-    for ext in _IMAGE_EXTENSIONS:
-        filename = f"{target}{ext}"
-        if filename in names:
-            return storage.get_image("skus", filename)
-    # fallback for any variant-specific asset if no generic SKU image exists
-    for name in names:
-        if Path(name).stem.startswith(f"{target}__"):
-            return storage.get_image("skus", name)
-    return None
+    packs = [i for i in imgs if i["role"] == "packaging"]
+    chosen = packs[0] if packs else imgs[0]
+    return load_sku_image_data(chosen["folder"], chosen["file"])
 
 
 # ---------------------------------------------------------------------------

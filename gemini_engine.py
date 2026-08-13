@@ -53,6 +53,7 @@ def build_brief(
     size_label: str,
     dimensions,
     banner_copy: str = "",
+    copy_mode: str = "own",
     logo_notes: str = "",
     has_logo: bool = False,
     include_logo: bool = True,
@@ -62,6 +63,7 @@ def build_brief(
     no_button: bool = False,
     design_elements_bw: bool = False,
     has_design_elements: bool = False,
+    product_roles: set | None = None,
 ) -> str:
     width, height = dimensions
     orientation = (
@@ -101,17 +103,26 @@ def build_brief(
         "=== THE CREATIVE REQUEST (interpret this; do not print it on the banner) ===\n"
         f"{user_prompt.strip() or f'A clean, appetising, on-brand banner featuring {sku}.'}\n\n"
     )
-    if banner_copy.strip():
+    mode = copy_mode or "own"
+    if mode == "none":
+        brief += (
+            "=== BANNER COPY ===\n"
+            "Do NOT place any headline, tagline, or written copy on this banner. It "
+            "must have NO headline text at all — show only the product, the "
+            "background, and (if applicable) the platform's own CTA button. The only "
+            "text allowed is whatever is already printed on the product packaging.\n\n"
+        )
+    elif mode == "own" and banner_copy.strip():
         brief += (
             "=== BANNER COPY (render exactly as written, do not change) ===\n"
             f"{banner_copy.strip()}\n\n"
         )
-    else:
+    else:  # "generate", or "own" left blank
         brief += (
             "=== BANNER COPY ===\n"
-            "No exact copy was provided. You may write ONE short headline that "
-            "follows the brand tone and the approved example headlines above. Keep "
-            "it legible at thumbnail size.\n\n"
+            "Write ONE short on-brand headline yourself, following the brand tone "
+            "and the approved example headlines above. Keep it legible at thumbnail "
+            "size.\n\n"
         )
     if not include_logo:
         brief += "=== BRAND LOGO ===\n"
@@ -169,6 +180,27 @@ def build_brief(
         if platform_notes.strip() and not no_button:
             brief += f"{platform} button rules to follow exactly:\n{platform_notes.strip()}\n"
         brief += "\n"
+    if product_roles:
+        brief += "=== PRODUCT IMAGES (attached) ===\n"
+        if "packaging" in product_roles:
+            brief += (
+                "PACKAGING: reproduce the product pack EXACTLY as shown — it is the "
+                "hero of the banner. Never redraw, restyle, recolour, or alter the "
+                "pack.\n"
+            )
+        if "styling" in product_roles:
+            brief += (
+                "STYLING / MOOD: use ONLY as a lighting and mood reference — match "
+                "its richness, warmth, and photographic feel. Do NOT copy it "
+                "literally and do NOT reproduce its background.\n"
+            )
+        if "pieces" in product_roles:
+            brief += (
+                "PRODUCT PIECES: loose product to use as appetite elements — place "
+                "tastefully to add richness, without cluttering or obscuring the "
+                "pack.\n"
+            )
+        brief += "\n"
     if has_design_elements:
         brief += "=== OPTIONAL DESIGN ELEMENTS ===\n"
         brief += (
@@ -187,13 +219,10 @@ def build_brief(
         brief += "\n"
     brief += (
         "=== STYLE REFERENCES ===\n"
-        "These show GO DESi's visual style. Match their colour, mood, energy, and "
-        "general composition. Do NOT copy their specific decorative elements or "
-        "layouts. They are style guidance, not templates to replicate.\n"
-        "The provided product image also shows GO DESi's photoshoot styling — "
-        "match its lighting quality, richness, warmth, and surface/mood. Reproduce "
-        "the pack exactly, but carry over the premium, appetising photographic "
-        "feel into the banner.\n\n"
+        "The attached reference banners show GO DESi's visual style. Match their "
+        "colour, mood, energy, and general composition. Do NOT copy their specific "
+        "decorative elements or layouts. They are style guidance, not templates to "
+        "replicate.\n\n"
         "Output: a single polished banner image.\n"
     )
     return brief
@@ -209,13 +238,13 @@ def assemble_payload(
     size_label: str,
     dimensions,
     banner_copy: str,
+    copy_mode: str,
     logo_image: bytes | None,
     logo_notes: str,
     include_logo: bool,
     design_elements: list,   # list[(label, bytes)]
     reference_images: list,  # list[(label, bytes)]
-    product_image: bytes | None,
-    product_label: str,
+    product_images: list,    # list[{"role", "data", "label"}]
     platform: str,
     platform_notes: str,
     platform_button: bytes | None,
@@ -233,6 +262,13 @@ def assemble_payload(
     # When the platform bakes in no button, never send the button image.
     send_button = None if no_button else platform_button
 
+    # Partition selected product images by role — Packaging is the hero and has
+    # the highest priority in the image cap.
+    packaging = [p for p in product_images if p.get("role") == "packaging"]
+    styling = [p for p in product_images if p.get("role") == "styling"]
+    pieces = [p for p in product_images if p.get("role") == "pieces"]
+    product_roles = {p.get("role") for p in (packaging + styling + pieces)}
+
     brief = build_brief(
         brand_rules,
         category,
@@ -242,6 +278,7 @@ def assemble_payload(
         size_label,
         dimensions,
         banner_copy=banner_copy,
+        copy_mode=copy_mode,
         logo_notes=logo_notes,
         has_logo=bool(send_logo),
         include_logo=include_logo,
@@ -251,19 +288,31 @@ def assemble_payload(
         no_button=no_button,
         design_elements_bw=design_elements_bw,
         has_design_elements=bool(design_elements),
+        product_roles=product_roles,
     )
 
+    _role_display = {
+        "packaging": "Packaging (hero)",
+        "styling": "Styling reference",
+        "pieces": "Product pieces",
+    }
+
     # Essentials are must-keeps and are NEVER trimmed by the image cap: the
-    # product shot, the brand logo (when shown), and the platform Order Now
-    # button. Only the optional supporting images (references, design elements)
-    # are trimmed to fit the cap.
+    # packaging (hero) shot, the brand logo (when shown), and the platform Order
+    # Now button. Styling/pieces product images come next, then the optional
+    # supporting images (references, design elements) which trim first.
     essentials: list[dict] = []
-    if product_image:
-        essentials.append({"role": "Product shot", "label": product_label, "data": product_image})
+    for p in packaging:
+        essentials.append({"role": "Product shot", "label": p.get("label") or "Packaging", "data": p["data"]})
     if send_logo:
         essentials.append({"role": "Logo", "label": "Brand logo", "data": send_logo})
     if send_button:
         essentials.append({"role": "Platform button", "label": f"{platform} Order Now button", "data": send_button})
+
+    supporting: list[dict] = []
+    for p in styling + pieces:
+        label = p.get("label") or _role_display.get(p.get("role"), "Product image")
+        supporting.append({"role": _role_display.get(p.get("role"), "Product image"), "label": label, "data": p["data"]})
 
     optional: list[dict] = []
     for label, data in list(reference_images)[: config.MAX_REFERENCES_PER_CALL]:
@@ -271,8 +320,8 @@ def assemble_payload(
     for label, data in list(design_elements)[: config.MAX_DESIGN_ELEMENTS_PER_CALL]:
         optional.append({"role": "Design element", "label": label, "data": data})
 
-    keep_optional = max(0, config.MAX_TOTAL_IMAGES - len(essentials))
-    images = essentials + optional[:keep_optional]
+    remaining = max(0, config.MAX_TOTAL_IMAGES - len(essentials))
+    images = essentials + (supporting + optional)[:remaining]
 
     return {"brief": brief, "images": images}
 

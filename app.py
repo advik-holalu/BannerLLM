@@ -313,16 +313,37 @@ def screen_create():
         selection = st.selectbox("Variant (optional)", [""] + variants)
         variant = selection or None
 
-    product_image = assets.load_sku_image(sku, variant)
-    if not product_image and variant:
-        product_image = assets.load_sku_image(sku)
+    # Available product images (with roles). Fall back to product-level images
+    # when a variant has none of its own.
+    sku_images = assets.list_sku_images(sku, variant)
+    if not sku_images and variant:
+        sku_images = assets.list_sku_images(sku)
 
-    if product_image:
-        st.caption("Product shot that will be used.")
-        st.image(product_image, width=180)
+    selected_images = []
+    if sku_images:
+        st.markdown("**Product images to use**")
+        st.caption("Select which image(s) to send. Packaging is the hero and is selected by default.")
+        sel_prefix = _widget_key("use_img", category, sku, variant or "")
+        per_row = 3
+        for i in range(0, len(sku_images), per_row):
+            cols = st.columns(per_row)
+            for col, entry in zip(cols, sku_images[i : i + per_row]):
+                with col:
+                    data = assets.load_sku_image_data(entry["folder"], entry["file"])
+                    if data:
+                        st.image(data, use_container_width=True)
+                    checked = st.checkbox(
+                        assets.sku_role_label(entry["role"]),
+                        value=entry["role"] == "packaging",
+                        key=_widget_key(sel_prefix, entry["folder"], entry["file"]),
+                    )
+                    if checked and data:
+                        selected_images.append(
+                            {"role": entry["role"], "data": data, "label": assets.sku_role_label(entry["role"])}
+                        )
     else:
         st.info(
-            "No product shot found for this product or variant. Upload one in Manage Products."
+            "No product images found for this product or variant. Upload some in Manage Products."
         )
 
     platforms = assets.load_platforms()
@@ -371,12 +392,30 @@ def screen_create():
         placeholder=f"e.g. A Diwali banner for {sku} with festive elements and a clear offer.",
     )
 
-    banner_copy = st.text_area(
-        "Banner copy (optional)",
-        height=80,
-        placeholder="Exact words to appear on the banner. Leave blank to let the model write a short headline.",
-        help="Whatever you type here is rendered on the banner exactly as written, not rewritten.",
+    _COPY_MODES = {
+        "Write my own": "own",
+        "No copy": "none",
+        "Generate copy": "generate",
+    }
+    copy_mode_label = st.radio(
+        "Banner copy",
+        list(_COPY_MODES.keys()),
+        index=0,
+        horizontal=True,
     )
+    copy_mode = _COPY_MODES[copy_mode_label]
+    banner_copy = ""
+    if copy_mode == "own":
+        banner_copy = st.text_area(
+            "Copy text",
+            height=80,
+            placeholder="Exact words to appear on the banner, rendered exactly as written.",
+            label_visibility="collapsed",
+        )
+    elif copy_mode == "none":
+        st.caption("No headline or copy text will be added to the banner.")
+    else:
+        st.caption("The model will write a short on-brand headline itself.")
 
     include_logo = st.checkbox(
         "Include GO DESi logo at top",
@@ -404,13 +443,13 @@ def screen_create():
                     size_label=size_label,
                     dimensions=dimensions,
                     banner_copy=banner_copy,
+                    copy_mode=copy_mode,
                     logo_image=logo_image,
                     logo_notes=logo_notes,
                     include_logo=include_logo,
                     design_elements=design_elements_named,
                     reference_images=reference_named,
-                    product_image=product_image,
-                    product_label=assets.sku_image_filename(sku, variant),
+                    product_images=selected_images,
                     platform=platform or "",
                     platform_notes=platform_notes,
                     platform_button=platform_button,
@@ -836,53 +875,63 @@ def _manage_level_variant(catalog: dict) -> None:
 
 def _manage_sku_image_section(sku: str, variant: str | None, category: str, catalog: dict) -> None:
     section_key = f"{sku}__{variant}" if variant else sku
-    cache_key = f"cached_{section_key}"
-    file_id_key = f"uploaded_{section_key}_file_id"
 
-    st.markdown("#### Product Image")
-
-    cached_image = st.session_state.cached_sku_images.get(cache_key)
-    current_image = cached_image or assets.load_sku_image(sku, variant)
-
-    if current_image:
-        if cache_key not in st.session_state.cached_sku_images:
-            st.session_state.cached_sku_images[cache_key] = current_image
-
-        st.image(current_image, caption="Current image", use_container_width=True)
-        if _confirm_delete(
-            _widget_key("remove_img", section_key),
-            "Remove this image?",
-            label="Remove",
-        ):
-            deleted = assets.delete_sku_image(sku, variant)
-            st.cache_data.clear()
-            if deleted:
-                st.session_state.cached_sku_images.pop(cache_key, None)
-                st.session_state[file_id_key] = None
-                st.toast("Image removed.")
-            else:
-                st.error("Image not found or deletion failed.")
-            st.rerun()
-    else:
-        st.caption("No image uploaded yet.")
-
-    upload = st.file_uploader(
-        "Upload new image",
-        type=["png", "jpg", "jpeg", "webp"],
-        key=_widget_key("upload_img", section_key),
-        label_visibility="collapsed",
+    st.markdown("#### Product images")
+    st.caption(
+        "Upload one or more images per product. Each has a role — the AI treats "
+        "Packaging as the hero, Styling / mood as a lighting reference, and "
+        "Product pieces as appetite elements."
     )
 
-    if upload and _consume_upload(file_id_key, _file_sig(upload)):
+    images = assets.list_sku_images(sku, variant)
+    if images:
+        per_row = 3
+        for i in range(0, len(images), per_row):
+            cols = st.columns(per_row)
+            for col, entry in zip(cols, images[i : i + per_row]):
+                with col:
+                    with st.container(border=True):
+                        data = assets.load_sku_image_data(entry["folder"], entry["file"])
+                        if data:
+                            st.image(data, use_container_width=True)
+                        st.caption(assets.sku_role_label(entry["role"]))
+                        if _confirm_delete(
+                            _widget_key("del_skuimg", entry["folder"], entry["file"]),
+                            "Remove this image?",
+                            label="Remove",
+                        ):
+                            assets.delete_sku_image_file(entry["folder"], entry["file"])
+                            st.toast("Image removed.")
+                            st.rerun()
+    else:
+        st.caption("No images uploaded yet.")
+
+    st.markdown("##### Add images")
+    role_labels = [label for _, label in assets.SKU_IMAGE_ROLES]
+    role_label = st.selectbox(
+        "Role for the image(s) below",
+        role_labels,
+        key=_widget_key("skuimg_role", section_key),
+    )
+    role_key = next(k for k, label in assets.SKU_IMAGE_ROLES if label == role_label)
+
+    uploads = st.file_uploader(
+        "Upload images",
+        type=["png", "jpg", "jpeg", "webp"],
+        accept_multiple_files=True,
+        key=_widget_key("skuimg_upload", section_key),
+        label_visibility="collapsed",
+    )
+    sig_key = _widget_key("skuimg_sig", section_key)
+    if uploads and _consume_upload(sig_key, _files_sig(uploads)):
         try:
-            data = upload.read()
-            assets.upload_sku_image(sku, variant, data, upload.name)
-            st.session_state.cached_sku_images[cache_key] = data
-            st.toast("Image saved to cloud storage.")
+            for up in uploads:
+                assets.upload_sku_image(sku, variant, up.read(), up.name, role=role_key)
+            st.toast(f"Saved {len(uploads)} image(s) as {role_label}.")
             st.rerun()
         except Exception as exc:
-            # Roll back the guard so the user can retry the same file.
-            st.session_state[file_id_key] = None
+            # Roll back the guard so the user can retry the same files.
+            st.session_state[sig_key] = None
             st.error(f"Upload failed: {exc}")
 
 

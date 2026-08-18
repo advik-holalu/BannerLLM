@@ -797,68 +797,80 @@ _GENERATED_FOLDER = "generated"
 _UNCATEGORIZED = "uncategorized"
 
 
-def _generated_subfolder(platform_slug: str) -> str:
-    return f"{_GENERATED_FOLDER}/{platform_slug}"
+_GALLERY_UNKNOWN = "Unknown"
 
 
-def save_generated_banner(platform: str, sku: str, variant: str | None, data: bytes) -> None:
-    """Save a generated banner grouped by platform, newest identifiable by name."""
-    slug = _slug(platform) if platform else _UNCATEGORIZED
+def save_generated_banner(platform: str, category: str, sku: str, variant: str | None, data: bytes, tag: str | None = None) -> None:
+    """Save a generated banner tagged with platform, category, and product.
+
+    Stored at generated/<platform-slug>/<category-slug>/<file>, with the display
+    names (platform, category, product, variant) also written as custom object
+    metadata so the Gallery can filter by any of them. An optional `tag`
+    (e.g. a carousel-set id) is prefixed to the filename.
+    """
+    platform_slug = _slug(platform) if platform else _UNCATEGORIZED
+    category_slug = _slug(category) if category else _UNCATEGORIZED
+    folder = f"{_GENERATED_FOLDER}/{platform_slug}/{category_slug}"
     base = _sku_image_basename(sku, variant)
-    filename = f"{base}_{int(time.time() * 1000)}.png"
-    storage.upload_image(_generated_subfolder(slug), filename, data, content_type="image/png")
-    load_generated_index.clear()
+    prefix = f"{_slug(tag)}_" if tag else ""
+    filename = f"{prefix}{base}_{int(time.time() * 1000)}.png"
+    storage.upload_image(
+        folder,
+        filename,
+        data,
+        content_type="image/png",
+        metadata={
+            "platform": platform or "",
+            "category": category or "",
+            "product": sku or "",
+            "variant": variant or "",
+        },
+    )
+    load_generated_banners.clear()
 
 
 @st.cache_data(show_spinner=False)
-def load_generated_index() -> list[dict]:
-    """Generated banners grouped by platform for the Gallery (one GCS list call).
+def load_generated_banners() -> list[dict]:
+    """Flat list of generated banners for the Gallery (ONE GCS list call).
 
-    Returns ordered buckets: current platforms first (even if empty), then any
-    orphan slugs, then "Uncategorized" last. Each bucket:
-        {"slug", "label", "count", "items": [{"folder","file","updated"} ...]}
-    with items sorted newest-first.
+    Each item: {folder, file, updated, platform, category, product} with display
+    labels resolved from object metadata, falling back to the folder path, and
+    "Unknown" for anything missing. Sorted newest-first.
     """
     meta = storage.list_blobs_meta(_GENERATED_FOLDER)
-    groups: dict[str, list] = {}
+    plat_label = {_slug(p): p for p in load_platforms()}
+    cat_label = {_slug(c): c for c in load_catalog().keys()}
+
+    banners: list[dict] = []
     for entry in meta:
         parts = entry["name"].split("/")
-        if len(parts) == 1:
-            slug, file = _UNCATEGORIZED, parts[0]
-            folder = _GENERATED_FOLDER
-        else:
-            slug, file = parts[0], parts[-1]
-            folder = _GENERATED_FOLDER + "/" + "/".join(parts[:-1])
-        groups.setdefault(slug, []).append(
-            {"folder": folder, "file": file, "updated": entry["updated"]}
-        )
+        file = parts[-1]
+        folder = _GENERATED_FOLDER + ("/" + "/".join(parts[:-1]) if len(parts) > 1 else "")
+        md = entry.get("metadata") or {}
 
-    def _sorted(items: list) -> list:
-        return sorted(items, key=lambda x: x["updated"], reverse=True)
+        platform = md.get("platform")
+        if not platform:
+            platform = plat_label.get(parts[0]) if len(parts) >= 2 else None
+        platform = platform or _GALLERY_UNKNOWN
 
-    platforms = load_platforms()
-    slug_to_label = {_slug(p): p for p in platforms}
+        category = md.get("category")
+        if not category and len(parts) >= 3:
+            category = cat_label.get(parts[1]) or parts[1].replace("_", " ").title()
+        category = category or _GALLERY_UNKNOWN
 
-    ordered: list[dict] = []
-    seen: set[str] = set()
-    for p in platforms:
-        s = _slug(p)
-        items = _sorted(groups.get(s, []))
-        ordered.append({"slug": s, "label": p, "count": len(items), "items": items})
-        seen.add(s)
-    for s, its in groups.items():
-        if s in seen or s == _UNCATEGORIZED:
-            continue
-        items = _sorted(its)
-        label = slug_to_label.get(s) or s.replace("_", " ").title()
-        ordered.append({"slug": s, "label": label, "count": len(items), "items": items})
-        seen.add(s)
-    if groups.get(_UNCATEGORIZED):
-        items = _sorted(groups[_UNCATEGORIZED])
-        ordered.append(
-            {"slug": _UNCATEGORIZED, "label": "Uncategorized", "count": len(items), "items": items}
-        )
-    return ordered
+        product = md.get("product") or _GALLERY_UNKNOWN
+
+        banners.append({
+            "folder": folder,
+            "file": file,
+            "updated": entry["updated"],
+            "platform": platform,
+            "category": category,
+            "product": product,
+        })
+
+    banners.sort(key=lambda b: b["updated"], reverse=True)
+    return banners
 
 
 @st.cache_data(show_spinner=False)
@@ -869,6 +881,6 @@ def load_generated_image(folder: str, file: str) -> bytes | None:
 
 def delete_generated_banner(folder: str, file: str) -> bool:
     deleted = storage.delete_image(folder, file)
-    load_generated_index.clear()
+    load_generated_banners.clear()
     load_generated_image.clear()
     return deleted

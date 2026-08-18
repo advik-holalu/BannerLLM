@@ -90,9 +90,12 @@ def _blob_name(folder: str, filename: str) -> str:
     return _normalize_folder(folder) + _normalize_filename(filename)
 
 
-def upload_image(folder: str, filename: str, data: bytes, content_type: str = "image/png") -> None:
+def upload_image(folder: str, filename: str, data: bytes, content_type: str = "image/png", metadata: dict | None = None) -> None:
     bucket = _bucket()
     blob = bucket.blob(_blob_name(folder, filename))
+    if metadata:
+        # Custom object metadata values must be strings.
+        blob.metadata = {str(k): str(v) for k, v in metadata.items() if v not in (None, "")}
     blob.upload_from_string(data, content_type=content_type)
 
 
@@ -122,8 +125,9 @@ def list_blobs_meta(folder: str) -> list[dict]:
     """List blobs under a folder with lightweight metadata in a SINGLE GCS call.
 
     Returns [{"name": <path relative to folder>, "updated": <epoch float>,
-    "size": <int>}]. `name` may contain a sub-path (e.g. "blinkit/x.png").
-    Metadata (updated/size) comes back with the listing — no per-blob fetch.
+    "size": <int>, "metadata": <dict>}]. `name` may contain a sub-path (e.g.
+    "blinkit/x.png"). Updated/size/custom-metadata come back with the listing —
+    no per-blob fetch.
     """
     bucket = _bucket()
     prefix = _normalize_folder(folder)
@@ -139,6 +143,7 @@ def list_blobs_meta(folder: str) -> list[dict]:
             "name": name,
             "updated": updated.timestamp() if updated else 0.0,
             "size": blob.size or 0,
+            "metadata": dict(blob.metadata or {}),
         })
     return out
 

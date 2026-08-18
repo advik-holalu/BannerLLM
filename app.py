@@ -6,6 +6,9 @@ Run locally:   streamlit run app.py
 """
 
 import hmac
+import io
+import time
+import zipfile
 import streamlit as st
 
 import assets
@@ -17,6 +20,16 @@ import storage
 
 def _widget_key(*parts: str) -> str:
     return "__".join(part.replace(" ", "_").lower() for part in parts)
+
+
+def _zip_named(items: list) -> bytes:
+    """Zip [(name, bytes), ...] with an order prefix so a carousel keeps its order."""
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        for i, (name, data) in enumerate(items, start=1):
+            safe = name.replace(" ", "_").lower()
+            zf.writestr(f"{i:02d}_{safe}.png", data)
+    return buf.getvalue()
 
 
 # On-screen preview is scaled down so the whole banner fits on a laptop screen.
@@ -186,6 +199,8 @@ def _init_state():
     # Conversation thread for the session: list of
     # {"prompt": str, "image": bytes} rounds, newest last.
     st.session_state.setdefault("thread", [])
+    # Carousel mode results: list of {"product": str, "data": bytes}.
+    st.session_state.setdefault("carousel_outputs", None)
     st.session_state.setdefault("last_brief", "")
     st.session_state.setdefault("manage_nav_level", "categories")
     st.session_state.setdefault("manage_selected_category", None)
@@ -198,7 +213,6 @@ def _init_state():
     st.session_state.setdefault("cached_variant_images", {})
     st.session_state.setdefault("cached_design_elements", {})
     st.session_state.setdefault("cached_reference_images", {})
-    st.session_state.setdefault("gallery_platform", None)
     st.session_state.setdefault("gallery_page", 0)
 
 
@@ -296,16 +310,28 @@ def screen_create():
         st.info("No categories yet. Add categories and products in Manage Products.")
         return
 
-    col1, col2 = st.columns(2)
-    with col1:
-        category = st.selectbox("Category", list(catalog.keys()))
-    with col2:
-        skus = catalog.get(category, {})
-        sku = st.selectbox("Product", list(skus.keys())) if skus else None
-
-    if not sku:
+    mode = st.radio(
+        "Mode",
+        ["Single banner", "Carousel"],
+        index=0,
+        horizontal=True,
+        key="create_mode",
+        help="Carousel generates one banner per selected product in a matched brand style.",
+    )
+    category = st.selectbox("Category", list(catalog.keys()), key="create_category")
+    products = list(catalog.get(category, {}).keys())
+    if not products:
         st.info("This category has no products yet. Add one in Manage Products.")
         return
+
+    if mode == "Carousel":
+        _screen_create_carousel(catalog, category, products)
+    else:
+        _screen_create_single(catalog, category, products)
+
+
+def _screen_create_single(catalog, category, products):
+    sku = st.selectbox("Product", products, key="single_product")
 
     variants = catalog[category][sku].get("variants", [])
     variant = None
@@ -377,19 +403,25 @@ def screen_create():
     template_choice = st.selectbox(
         "Start from a template (optional)",
         ["— Write my own —"] + list(config.PROMPT_TEMPLATES.keys()),
+        key="single_template",
     )
-    if template_choice != "— Write my own —":
-        default_prompt = config.PROMPT_TEMPLATES[template_choice].format(
-            sku=sku, category=category
-        )
-    else:
-        default_prompt = ""
+    # Populate the Prompt box when a new template is picked (user can still edit).
+    prompt_key = "single_prompt"
+    applied_key = "single_template_applied"
+    if st.session_state.get(applied_key) != template_choice:
+        if template_choice != "— Write my own —":
+            st.session_state[prompt_key] = config.PROMPT_TEMPLATES[template_choice].format(
+                sku=sku, category=category
+            )
+        else:
+            st.session_state[prompt_key] = ""
+        st.session_state[applied_key] = template_choice
 
     user_prompt = st.text_area(
         "Prompt",
-        value=default_prompt,
         height=140,
         placeholder=f"e.g. A Diwali banner for {sku} with festive elements and a clear offer.",
+        key=prompt_key,
     )
 
     _COPY_MODES = {
@@ -464,7 +496,7 @@ def screen_create():
                 initial_prompt = user_prompt.strip() or f"Generate a banner for {sku}."
                 st.session_state.thread = [{"prompt": initial_prompt, "image": img}]
                 # Save grouped by platform so the Gallery can drill down by platform.
-                assets.save_generated_banner(platform or "", sku, variant, img)
+                assets.save_generated_banner(platform or "", category, sku, variant, img)
                 st.success("Banner generated and saved to cloud storage.")
             except Exception as exc:
                 st.error(f"Generation failed: {exc}")
@@ -525,6 +557,243 @@ def screen_create():
                     st.error(f"Edit failed: {exc}")
 
 
+# ----------------------------------------------------------------------------
+# Shared inputs used by both single and carousel modes
+# ----------------------------------------------------------------------------
+_COPY_MODES = {
+    "Write my own": "own",
+    "No copy": "none",
+    "Generate copy": "generate",
+}
+
+
+def _platform_size_prompt_inputs(category: str, label_for_prompt: str, key_prefix: str) -> dict:
+    """Render the shared platform / size / prompt block and return its values."""
+    platforms = assets.load_platforms()
+    platform = st.selectbox("Platform", platforms, index=0, key=_widget_key(key_prefix, "platform")) if platforms else None
+    no_button = assets.load_platform_no_button(platform) if platform else False
+    platform_button = assets.load_platform_button(platform) if platform else None
+
+    if platform and no_button:
+        st.caption(f"{platform} uses its own CTA — no Order Now button is added to the banner.")
+    elif platform and platform_button:
+        st.caption(f"The {platform} Order Now button will be placed on the banner.")
+    elif platform:
+        st.caption(
+            f"No Order Now button uploaded for {platform}. Add one under "
+            "Rules & Assets → Platforms, or its notes will still be applied."
+        )
+
+    fixed_size = assets.platform_fixed_size(platform) if platform else None
+    if fixed_size:
+        size_label, dimensions = fixed_size
+        st.caption(f"{platform} banners are generated at {dimensions[0]}x{dimensions[1]} ({size_label}).")
+    else:
+        size_label = st.selectbox("Banner size", list(config.BANNER_SIZES.keys()), key=_widget_key(key_prefix, "size"))
+        dimensions = config.BANNER_SIZES[size_label]
+
+    st.markdown("**What should the banner look like?**")
+    template_choice = st.selectbox(
+        "Start from a template (optional)",
+        ["— Write my own —"] + list(config.PROMPT_TEMPLATES.keys()),
+        key=_widget_key(key_prefix, "template"),
+    )
+    # Populate the Prompt box when a new template is picked (user can still edit
+    # it afterwards). A keyed text_area ignores `value=` once it has state, so we
+    # write the template text into session state on change instead.
+    prompt_key = _widget_key(key_prefix, "prompt")
+    applied_key = _widget_key(key_prefix, "template_applied")
+    if st.session_state.get(applied_key) != template_choice:
+        if template_choice != "— Write my own —":
+            st.session_state[prompt_key] = config.PROMPT_TEMPLATES[template_choice].format(
+                sku=label_for_prompt, category=category
+            )
+        else:
+            st.session_state[prompt_key] = ""
+        st.session_state[applied_key] = template_choice
+    user_prompt = st.text_area(
+        "Prompt",
+        height=140,
+        placeholder=f"e.g. A Diwali banner for {label_for_prompt} with festive elements and a clear offer.",
+        key=prompt_key,
+    )
+    return {
+        "platform": platform,
+        "no_button": no_button,
+        "platform_button": platform_button,
+        "size_label": size_label,
+        "dimensions": dimensions,
+        "user_prompt": user_prompt,
+    }
+
+
+def _screen_create_carousel(catalog, category, products):
+    st.caption("Generate one banner per selected product, in a matched brand style.")
+    selected_products = st.multiselect(
+        "Products for the carousel",
+        products,
+        key=_widget_key("carousel_products", category),
+    )
+
+    shared = _platform_size_prompt_inputs(category, "the products", "carousel")
+
+    copy_mode = _COPY_MODES[st.radio("Banner copy", list(_COPY_MODES.keys()), index=0, horizontal=True, key="carousel_copymode")]
+    per_product_copy = {}
+    if copy_mode == "own":
+        st.caption("Optional copy per product — leave blank to auto-generate that one.")
+        for product in selected_products:
+            per_product_copy[product] = st.text_input(
+                f"Copy for {product}",
+                key=_widget_key("carousel_copy", category, product),
+            )
+    elif copy_mode == "none":
+        st.caption("No headline or copy text will be added to any banner.")
+    else:
+        st.caption("The model will write a short on-brand headline for each banner.")
+
+    include_logo = st.checkbox(
+        "Include GO DESi logo at top",
+        value=True,
+        key="carousel_include_logo",
+        help="When off, no separate GO DESi logo is added — only the logo printed on the product pack appears.",
+    )
+
+    ready = len(selected_products) >= 2
+    if not ready:
+        st.info("Select at least two products for a carousel.")
+
+    if st.button("Generate carousel", type="primary", use_container_width=True, disabled=not ready):
+        with st.spinner(f"Designing {len(selected_products)} banners..."):
+            try:
+                brand_rules = assets.load_brand_rules_text()
+                logo_image = assets.load_logo()
+                logo_notes = assets.load_logo_notes()
+                reference_named = assets.load_reference_images_named(category)
+                design_elements_named = assets.load_design_elements_named()
+                platform = shared["platform"]
+                platform_notes = assets.load_platform_notes(platform) if platform else ""
+                set_tag = f"carousel{int(time.time())}"
+
+                outputs = []
+                failed = []
+                carousel_reference = None
+                for product in selected_products:
+                    # Each product is isolated: a transient failure on one does
+                    # not discard the banners already generated.
+                    try:
+                        # Use this product's packaging image (product level).
+                        imgs = assets.list_sku_images(product, None)
+                        packs = [e for e in imgs if e["role"] == "packaging"] or imgs
+                        product_images = []
+                        if packs:
+                            data = assets.load_sku_image_data(packs[0]["folder"], packs[0]["file"])
+                            if data:
+                                product_images = [{"role": "packaging", "data": data, "label": "Packaging"}]
+
+                        banner_copy = per_product_copy.get(product, "") if copy_mode == "own" else ""
+                        payload = engine.assemble_payload(
+                            brand_rules=brand_rules,
+                            category=category,
+                            sku=product,
+                            variant=None,
+                            user_prompt=shared["user_prompt"],
+                            size_label=shared["size_label"],
+                            dimensions=shared["dimensions"],
+                            banner_copy=banner_copy,
+                            copy_mode=copy_mode,
+                            logo_image=logo_image,
+                            logo_notes=logo_notes,
+                            include_logo=include_logo,
+                            design_elements=design_elements_named,
+                            reference_images=reference_named,
+                            product_images=product_images,
+                            platform=platform or "",
+                            platform_notes=platform_notes,
+                            platform_button=shared["platform_button"],
+                            no_button=shared["no_button"],
+                            design_elements_bw=config.DESIGN_ELEMENTS_ARE_BW,
+                            carousel_reference=carousel_reference,
+                        )
+                        img = engine.generate_from_payload(payload["brief"], payload["images"])
+                        if carousel_reference is None:
+                            # First successful page becomes the style reference.
+                            carousel_reference = img
+                        outputs.append({"product": product, "data": img})
+                        assets.save_generated_banner(platform or "", category, product, None, img, tag=set_tag)
+                    except Exception as exc:
+                        failed.append(product)
+
+                st.session_state.carousel_outputs = outputs
+                if outputs and failed:
+                    st.warning(
+                        f"Generated {len(outputs)} of {len(selected_products)}. "
+                        f"Failed (likely a temporary Gemini timeout): {', '.join(failed)}. "
+                        "Re-run to retry just those."
+                    )
+                elif outputs:
+                    st.success(f"Generated {len(outputs)} banners and saved to cloud storage.")
+                else:
+                    st.error(
+                        "All generations failed — Gemini looks temporarily overloaded. "
+                        "Wait a moment and try again."
+                    )
+            except Exception as exc:
+                st.error(f"Generation failed: {exc}")
+
+    outputs = st.session_state.get("carousel_outputs")
+    if outputs:
+        st.divider()
+        st.markdown("**Carousel set**")
+        st.caption("Assemble these as a carousel in Meta Ads Manager, in order.")
+        per_row = 2
+        for i in range(0, len(outputs), per_row):
+            cols = st.columns(per_row)
+            for col, out in zip(cols, outputs[i : i + per_row]):
+                with col:
+                    with st.container(border=True):
+                        # Fit each banner to its column (keeps the 4:5 aspect);
+                        # the fixed-width preview is only for full-width single view.
+                        st.image(out["data"], caption=out["product"], use_container_width=True)
+                        st.download_button(
+                            "Download",
+                            data=out["data"],
+                            file_name=f"godesi_{out['product'].replace(' ', '_').lower()}.png",
+                            mime="image/png",
+                            key=_widget_key("carousel_dl", out["product"]),
+                            type="primary",
+                            use_container_width=True,
+                        )
+                        # Enhance this specific banner (applies to it in place, so
+                        # its Download and the ZIP reflect the new version).
+                        enh = st.text_input(
+                            "Enhance",
+                            placeholder="Enhance: e.g. make the background warmer",
+                            label_visibility="collapsed",
+                            key=_widget_key("carousel_enh", out["product"]),
+                        )
+                        if st.button(
+                            "Enhance",
+                            icon=":material/auto_awesome:",
+                            type="secondary",
+                            use_container_width=True,
+                            key=_widget_key("carousel_enh_send", out["product"]),
+                        ) and enh.strip():
+                            with st.spinner("Enhancing..."):
+                                try:
+                                    out["data"] = engine.edit_banner(out["data"], enh)
+                                    st.rerun()
+                                except Exception as exc:
+                                    st.error(f"Enhance failed: {exc}")
+        st.download_button(
+            "Download all (ZIP)",
+            data=_zip_named([(o["product"], o["data"]) for o in outputs]),
+            file_name="godesi_carousel.zip",
+            mime="application/zip",
+            type="secondary",
+            use_container_width=True,
+        )
+
+
 # ============================================================================
 # SCREEN 1b — GALLERY
 # ============================================================================
@@ -533,53 +802,53 @@ _GALLERY_PAGE_SIZE = 12
 
 def screen_gallery():
     st.title("Gallery")
-    index = assets.load_generated_index()
-    selected = st.session_state.get("gallery_platform")
-
-    # --- Top level: platform cards with counts ---
-    if not selected:
-        st.caption("Past generated banners, grouped by platform. Newest first.")
-        if not index:
-            st.info("No banners generated yet.")
-            return
-        per_row = 3
-        for i in range(0, len(index), per_row):
-            cols = st.columns(per_row)
-            for col, bucket in zip(cols, index[i : i + per_row]):
-                with col:
-                    with st.container(border=True):
-                        st.subheader(bucket["label"])
-                        n = bucket["count"]
-                        st.caption(f"{n} banner{'s' if n != 1 else ''}")
-                        if st.button(
-                            "View",
-                            key=_widget_key("gal_view", bucket["slug"]),
-                            type="primary",
-                            use_container_width=True,
-                            disabled=n == 0,
-                        ):
-                            st.session_state.gallery_platform = bucket["slug"]
-                            st.session_state.gallery_page = 0
-                            st.rerun()
+    banners = assets.load_generated_banners()
+    if not banners:
+        st.info("No banners generated yet.")
         return
 
-    # --- Platform level: paginated grid of that platform's banners ---
-    bucket = next((b for b in index if b["slug"] == selected), None)
-    if st.button("< back to platforms", key="gallery_back", type="secondary"):
-        st.session_state.gallery_platform = None
-        st.session_state.gallery_page = 0
-        st.rerun()
-    if bucket is None or not bucket["items"]:
-        st.markdown(f"### {bucket['label'] if bucket else selected}")
-        st.info("No banners for this platform yet.")
+    st.caption("Filter past banners by platform, category, and product. Newest first.")
+
+    # --- Filters (combine; Category/Product options depend on the ones above) ---
+    f1, f2, f3 = st.columns(3)
+    with f1:
+        platform_opts = ["All"] + sorted({b["platform"] for b in banners})
+        platform_sel = st.selectbox("Platform", platform_opts, key="gal_platform")
+
+    cat_pool = [b for b in banners if platform_sel == "All" or b["platform"] == platform_sel]
+    category_opts = ["All"] + sorted({b["category"] for b in cat_pool})
+    if st.session_state.get("gal_category") not in category_opts:
+        st.session_state["gal_category"] = "All"
+    with f2:
+        category_sel = st.selectbox("Category", category_opts, key="gal_category")
+
+    prod_pool = [b for b in cat_pool if category_sel == "All" or b["category"] == category_sel]
+    product_opts = ["All"] + sorted({b["product"] for b in prod_pool})
+    if st.session_state.get("gal_product") not in product_opts:
+        st.session_state["gal_product"] = "All"
+    with f3:
+        product_sel = st.selectbox("Product", product_opts, key="gal_product")
+
+    results = [
+        b for b in prod_pool
+        if product_sel == "All" or b["product"] == product_sel
+    ]
+
+    # Reset to page 1 whenever the filter set changes.
+    filt = (platform_sel, category_sel, product_sel)
+    if st.session_state.get("gal_filt") != filt:
+        st.session_state["gal_filt"] = filt
+        st.session_state["gallery_page"] = 0
+
+    st.caption(f"{len(results)} banner{'s' if len(results) != 1 else ''}")
+    if not results:
+        st.info("No banners match these filters.")
         return
 
-    st.markdown(f"### {bucket['label']}")
-    items = bucket["items"]  # already newest-first
-    total_pages = (len(items) + _GALLERY_PAGE_SIZE - 1) // _GALLERY_PAGE_SIZE
+    total_pages = (len(results) + _GALLERY_PAGE_SIZE - 1) // _GALLERY_PAGE_SIZE
     page = max(0, min(st.session_state.get("gallery_page", 0), total_pages - 1))
     start = page * _GALLERY_PAGE_SIZE
-    page_items = items[start : start + _GALLERY_PAGE_SIZE]
+    page_items = results[start : start + _GALLERY_PAGE_SIZE]
 
     per_row = 3
     for i in range(0, len(page_items), per_row):
@@ -592,6 +861,7 @@ def screen_gallery():
                         st.caption("(image unavailable)")
                         continue
                     st.image(data, use_container_width=True)
+                    st.caption(f"{item['product']} · {item['category']}")
                     st.download_button(
                         "Download",
                         data=data,

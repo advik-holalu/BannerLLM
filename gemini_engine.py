@@ -9,6 +9,7 @@ You should not need to edit this file. It does three things:
 
 import base64
 import os
+import time
 
 import config
 from google.genai import types
@@ -64,6 +65,7 @@ def build_brief(
     design_elements_bw: bool = False,
     has_design_elements: bool = False,
     product_roles: set | None = None,
+    carousel_match: bool = False,
 ) -> str:
     width, height = dimensions
     orientation = (
@@ -217,6 +219,16 @@ def build_brief(
                 "choose to use so they suit the banner's palette.\n"
             )
         brief += "\n"
+    if carousel_match:
+        brief += (
+            "=== CAROUSEL STYLE MATCH ===\n"
+            "This banner is ONE page of a multi-product carousel set. An additional "
+            "reference image of the FIRST banner in the set is attached. Match the "
+            "colour scheme, background style, layout, and composition of that "
+            "reference as closely as possible — only the product and its copy "
+            "change. Keep the same format and feel so the pages read as a matched "
+            "set.\n\n"
+        )
     brief += (
         "=== STYLE REFERENCES ===\n"
         "The attached reference banners show GO DESi's visual style. Match their "
@@ -250,6 +262,7 @@ def assemble_payload(
     platform_button: bytes | None,
     no_button: bool = False,
     design_elements_bw: bool = True,
+    carousel_reference: bytes | None = None,
 ) -> dict:
     """Build the brief + labelled image list for one generation.
 
@@ -289,6 +302,7 @@ def assemble_payload(
         design_elements_bw=design_elements_bw,
         has_design_elements=bool(design_elements),
         product_roles=product_roles,
+        carousel_match=bool(carousel_reference),
     )
 
     _role_display = {
@@ -304,6 +318,9 @@ def assemble_payload(
     essentials: list[dict] = []
     for p in packaging:
         essentials.append({"role": "Product shot", "label": p.get("label") or "Packaging", "data": p["data"]})
+    # The first carousel banner is a must-keep style reference for later pages.
+    if carousel_reference:
+        essentials.append({"role": "Carousel style match", "label": "First carousel page", "data": carousel_reference})
     if send_logo:
         essentials.append({"role": "Logo", "label": "Brand logo", "data": send_logo})
     if send_button:
@@ -326,25 +343,46 @@ def assemble_payload(
     return {"brief": brief, "images": images}
 
 
-def generate_from_payload(brief: str, images: list) -> bytes:
-    """Send an already-assembled payload (from assemble_payload) to Gemini."""
+# Transient Gemini errors worth retrying (server overloaded, deadline expired,
+# rate limited). These are per-request and usually clear on a second try.
+_RETRYABLE_MARKERS = ("503", "unavailable", "deadline", "overloaded", "500", "internal", "429", "rate limit", "resource exhausted")
+_MAX_ATTEMPTS = 4
+
+
+def _is_retryable(exc: Exception) -> bool:
+    msg = str(exc).lower()
+    return any(marker in msg for marker in _RETRYABLE_MARKERS)
+
+
+def _generate(parts: list) -> bytes:
+    """Call the image model with retries + exponential backoff on transient errors."""
     client = _client()
     model = config.MODELS[config.ACTIVE_MODEL]
+    delay = 2.0
+    for attempt in range(1, _MAX_ATTEMPTS + 1):
+        try:
+            response = client.models.generate_content(
+                model=model,
+                contents=parts,
+                config=types.GenerateContentConfig(response_modalities=["image"]),
+            )
+            return _extract_image(response)
+        except Exception as exc:
+            if attempt >= _MAX_ATTEMPTS or not _is_retryable(exc):
+                raise
+            time.sleep(delay)
+            delay *= 2
+
+
+def generate_from_payload(brief: str, images: list) -> bytes:
+    """Send an already-assembled payload (from assemble_payload) to Gemini."""
     parts = [types.Part(text=brief)]
     for item in images:
         parts.append(_image_part(item["data"]))
-
-    response = client.models.generate_content(
-        model=model,
-        contents=parts,
-        config=types.GenerateContentConfig(response_modalities=["image"]),
-    )
-    return _extract_image(response)
+    return _generate(parts)
 
 
 def edit_banner(previous_image: bytes, edit_instruction: str) -> bytes:
-    client = _client()
-    model = config.MODELS[config.ACTIVE_MODEL]
     parts = [
         types.Part(
             text=(
@@ -355,12 +393,7 @@ def edit_banner(previous_image: bytes, edit_instruction: str) -> bytes:
         ),
         _image_part(previous_image),
     ]
-    response = client.models.generate_content(
-        model=model,
-        contents=parts,
-        config=types.GenerateContentConfig(response_modalities=["image"]),
-    )
-    return _extract_image(response)
+    return _generate(parts)
 
 
 def _decode_data_url(data_url: str) -> bytes:

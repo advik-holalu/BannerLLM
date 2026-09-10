@@ -96,9 +96,16 @@ CORE_RULES = (
     "colours, chosen to make the pack stand out.\n\n"
     "BACKGROUND\n"
     "- The background must be clean and uncluttered so the pack stands out — but "
-    "it should have DEPTH and richness, not look flat or sterile. A solid colour, "
-    "a soft gradient, a subtle two-tone, or a lightly textured surface are all "
-    "good. Rich, warm, professional lighting.\n"
+    "its ENERGY and SATURATION should match the product's character. "
+    "Premium/restrained products (e.g. traditional sweets, gifting) get calmer, "
+    "refined backgrounds. Playful, fun products (e.g. candy/POPz, snacks) get "
+    "bold, vibrant, saturated, high-energy backgrounds. \"Clean\" means "
+    "uncluttered, NOT muted — a vibrant solid or punchy two-tone background is "
+    "clean and on-brand for playful products. Let the user's prompt guide the "
+    "energy level; do not force everything to be calm/muted.\n"
+    "- The background should have DEPTH and richness, not look flat or sterile. A "
+    "solid colour, a soft gradient, a subtle two-tone, or a lightly textured "
+    "surface are all good. Rich, warm, professional lighting.\n"
     "- Dimensional appetite elements ARE encouraged when they serve the product: "
     "a ghee splash, drizzle, loose product pieces with real shadows, a subtle "
     "premium surface. These add appetite and richness.\n"
@@ -125,16 +132,18 @@ CORE_RULES = (
     "- This banner appears small on a phone, scrolled past in under two seconds, "
     "beside competitors. If it doesn't work at thumbnail size, it has failed.\n"
     "- The product pack is the hero — the largest, highest-contrast element.\n"
-    "- The area directly behind and around the pack must be clean, plain, and "
-    "low-contrast. Never place dense patterns, rangoli, mandalas, or busy motifs "
-    "behind or overlapping the pack.\n"
+    "- The area directly behind and around the pack must be clean and uncluttered, "
+    "with enough contrast/separation for the pack to pop — it MAY be vibrant, it "
+    "just must not be busy. Never place dense patterns, rangoli, mandalas, or busy "
+    "motifs behind or overlapping the pack.\n"
     "- Decoration lives at the edges/periphery only. The centre belongs to the "
     "product.\n"
     "- Contrast, not clutter, creates depth. Separate the pack from its "
     "background with clean contrast and lighting.\n"
-    "- Loudness resolution: the pack, colour palette, and copy carry the energy — "
-    "bold, warm, high-contrast. The background stays calm and uncluttered. Never "
-    "resolve \"fun and loud\" by filling the frame with decoration.\n"
+    "- Loudness resolution: the pack, colour palette, copy, AND background together "
+    "carry the energy — match the background's vibrancy to the product's character. "
+    "Keep it uncluttered; never resolve \"fun and loud\" by filling the frame with "
+    "decoration or clutter.\n"
     "- Maintain 30-40% clean negative space. Do not fill it with decoration.\n\n"
     "BRAND IDENTITY — WHAT \"FUN AND LOUD\" MEANS\n"
     "- GO DESi is modern, playful, quirky, and clean. It is NOT traditional-ornate "
@@ -222,9 +231,70 @@ DEFAULT_PLATFORMS = [
 PLATFORM_FIXED_SIZE = {
     # Meta feed testing: a single 4:5 banner.
     "Meta / Instagram": ("4:5 feed (1080x1350)", (1080, 1350)),
-    # Example: pin Blinkit/Zepto too by filling their exact sizes:
-    # "Blinkit": ("Blinkit banner (208x520)", (208, 520)),
+    # Blinkit ad slot: a single fixed 208x520 banner.
+    "Blinkit": ("Blinkit banner (208x520)", (208, 520)),
+    # Example: pin Zepto too by filling its exact size:
     # "Zepto":   ("Zepto banner (WxH)", (1080, 1080)),
+}
+
+# ----------------------------------------------------------------------------
+# Per-platform STRICT COMPOSITING. Some platforms (e.g. Blinkit "Listing
+# Spotlight") reject creatives that place ANY content in the mandatory padding
+# zones. A prompt alone can't enforce pixel margins, so for these platforms we
+# do NOT trust the model to leave the borders empty. Instead:
+#   1. The model generates ONLY the content area (safe_area x scale), told it is
+#      the full frame to fill edge to edge.
+#   2. Code (Pillow) pastes that content into the exact centre of a flat-colour
+#      canvas (final_size x scale), leaving guaranteed-empty padding all around.
+#   3. We export the deliverable at exactly final_size, and keep the hi-res
+#      (final_size x scale) too.
+#
+# Any platform with an entry here uses this compositing path; platforms without
+# one keep the normal single-image flow. To add another strict platform later,
+# copy the Blinkit block and change the numbers + composition_brief.
+#
+# Each entry:
+#   final_size       (w, h) of the downloadable deliverable, in px.
+#   safe_area        (w, h) of the centred safe content area, in px (final scale).
+#   scale            integer multiplier we generate/composite at, for crispness.
+#   fallback_bg      hex colour used for the padding when edge-sampling the
+#                    generated content looks unreliable (content bleeds to edge).
+#   composition_brief  top-to-bottom art direction for the content frame. This is
+#                    the ONLY place to tune Blinkit's composition; it is injected
+#                    into the brief when this platform is generated.
+# Padding is DERIVED, never stored: left/right = (final_w - safe_w) / 2,
+# top/bottom = (final_h - safe_h) / 2. For Blinkit that is 24px L/R, 74px T/B at
+# final size (96 / 296 at 4x).
+# ----------------------------------------------------------------------------
+PLATFORM_COMPOSITE = {
+    "Blinkit": {
+        "final_size": (208, 520),
+        "safe_area": (160, 372),
+        "scale": 4,
+        "fallback_bg": "#F4B43C",  # GO DESi warm yellow, used if sampling is off
+        "composition_brief": (
+            "This is a Blinkit Listing Spotlight creative. The frame you are given "
+            "IS the full, publishable banner — fill it edge to edge with the "
+            "composition. Do NOT leave large empty borders; keep only a small even "
+            "internal margin so nothing is flush against the very edge. Compose "
+            "top to bottom:\n"
+            "1. Product pack upright, front-facing, fully visible including the top "
+            "seal, occupying roughly the top 40-45% of the frame.\n"
+            "2. A cluster of loose product pieces / chips just below the pack — "
+            "none of them touching the frame edges.\n"
+            "3. Headline in up to 2 lines, white, bold rounded sans-serif, large "
+            "and legible (it must still read clearly when the banner is shrunk to "
+            "208x520).\n"
+            "4. An \"Order Now\" pill with a white fill, centred, near the bottom "
+            "of the frame but not touching the edge.\n"
+            "Flames or chillies are allowed only subtly around the pack, never "
+            "near the frame edges. Keep the background a smooth, continuous "
+            "colour or gradient at all four edges — no objects, text, or hard "
+            "shapes touching any edge — so the background can be extended "
+            "outward seamlessly. No price or discount callouts. No terms, "
+            "conditions, or fine print. English text only."
+        ),
+    },
 }
 
 # Platforms whose banners must NOT bake in an Order Now / CTA button — the ad

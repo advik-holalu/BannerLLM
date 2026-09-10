@@ -238,64 +238,16 @@ PLATFORM_FIXED_SIZE = {
 }
 
 # ----------------------------------------------------------------------------
-# Per-platform STRICT COMPOSITING. Some platforms (e.g. Blinkit "Listing
-# Spotlight") reject creatives that place ANY content in the mandatory padding
-# zones. A prompt alone can't enforce pixel margins, so for these platforms we
-# do NOT trust the model to leave the borders empty. Instead:
-#   1. The model generates ONLY the content area (safe_area x scale), told it is
-#      the full frame to fill edge to edge.
-#   2. Code (Pillow) pastes that content into the exact centre of a flat-colour
-#      canvas (final_size x scale), leaving guaranteed-empty padding all around.
-#   3. We export the deliverable at exactly final_size, and keep the hi-res
-#      (final_size x scale) too.
-#
-# Any platform with an entry here uses this compositing path; platforms without
-# one keep the normal single-image flow. To add another strict platform later,
-# copy the Blinkit block and change the numbers + composition_brief.
-#
-# Each entry:
-#   final_size       (w, h) of the downloadable deliverable, in px.
-#   safe_area        (w, h) of the centred safe content area, in px (final scale).
-#   scale            integer multiplier we generate/composite at, for crispness.
-#   fallback_bg      hex colour used for the padding when edge-sampling the
-#                    generated content looks unreliable (content bleeds to edge).
-#   composition_brief  top-to-bottom art direction for the content frame. This is
-#                    the ONLY place to tune Blinkit's composition; it is injected
-#                    into the brief when this platform is generated.
-# Padding is DERIVED, never stored: left/right = (final_w - safe_w) / 2,
-# top/bottom = (final_h - safe_h) / 2. For Blinkit that is 24px L/R, 74px T/B at
-# final size (96 / 296 at 4x).
+# CONTENT SAFE ZONE. Every banner keeps all of its content — product, copy,
+# logo, CTA button, design elements — inside a centred zone this wide/tall, as a
+# percentage of the frame, leaving a clean background margin all around so
+# nothing important is cut off or crowds the edge (important for ad slots like
+# Blinkit that reject content in the outer padding). This is a brief instruction
+# only (no cropping/compositing): the model is told to hold content inside the
+# central band. 80 => content within the central 80%, i.e. a ~10% margin on
+# each side. Set to 100 to disable the margin.
 # ----------------------------------------------------------------------------
-PLATFORM_COMPOSITE = {
-    "Blinkit": {
-        "final_size": (208, 520),
-        "safe_area": (160, 372),
-        "scale": 4,
-        "fallback_bg": "#F4B43C",  # GO DESi warm yellow, used if sampling is off
-        "composition_brief": (
-            "This is a Blinkit Listing Spotlight creative. The frame you are given "
-            "IS the full, publishable banner — fill it edge to edge with the "
-            "composition. Do NOT leave large empty borders; keep only a small even "
-            "internal margin so nothing is flush against the very edge. Compose "
-            "top to bottom:\n"
-            "1. Product pack upright, front-facing, fully visible including the top "
-            "seal, occupying roughly the top 40-45% of the frame.\n"
-            "2. A cluster of loose product pieces / chips just below the pack — "
-            "none of them touching the frame edges.\n"
-            "3. Headline in up to 2 lines, white, bold rounded sans-serif, large "
-            "and legible (it must still read clearly when the banner is shrunk to "
-            "208x520).\n"
-            "4. An \"Order Now\" pill with a white fill, centred, near the bottom "
-            "of the frame but not touching the edge.\n"
-            "Flames or chillies are allowed only subtly around the pack, never "
-            "near the frame edges. Keep the background a smooth, continuous "
-            "colour or gradient at all four edges — no objects, text, or hard "
-            "shapes touching any edge — so the background can be extended "
-            "outward seamlessly. No price or discount callouts. No terms, "
-            "conditions, or fine print. English text only."
-        ),
-    },
-}
+CONTENT_SAFE_ZONE_PCT = 80
 
 # Platforms whose banners must NOT bake in an Order Now / CTA button — the ad
 # platform supplies its own call-to-action. This is the DEFAULT "no Order Now

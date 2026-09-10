@@ -408,18 +408,6 @@ def _screen_create_single(catalog, category, products):
         size_label = st.selectbox("Banner size", list(config.BANNER_SIZES.keys()))
         dimensions = config.BANNER_SIZES[size_label]
 
-    # Strict-compositing platforms (e.g. Blinkit) generate the content frame and
-    # then guarantee the mandatory padding in code — no cropping, no bleed.
-    composite = engine.composite_spec(platform) if platform else None
-    if composite:
-        fw, fh = composite["final_size"]
-        sw, sh = composite["safe_area"]
-        st.caption(
-            f"{platform} spec compositing on: all content is kept inside the "
-            f"{sw}x{sh} safe area and the background extends seamlessly to the "
-            f"full {fw}x{fh} canvas — one banner, no inner box."
-        )
-
     st.markdown("**What should the banner look like?**")
     template_choice = st.selectbox(
         "Start from a template (optional)",
@@ -521,79 +509,21 @@ def _screen_create_single(catalog, category, products):
                     no_button=no_button,
                     design_elements_bw=config.DESIGN_ELEMENTS_ARE_BW,
                     reserve_top=reserve_top,
-                    composite=composite,
                 )
                 img = engine.generate_from_payload(payload["brief"], payload["images"])
                 st.session_state.last_brief = payload["brief"]
 
-                if composite:
-                    # Paste the generated content into the padded canvas; the
-                    # deliverable and hi-res are shown in a dedicated block below.
-                    result = engine.composite_final(img, composite)
-                    st.session_state.composite_result = {
-                        "platform": platform,
-                        "sku": sku,
-                        "deliverable": result["deliverable"],
-                        "full_res": result["full_res"],
-                        "final_size": composite["final_size"],
-                        "canvas_size": composite["canvas_size"],
-                    }
-                    st.session_state.current_image = result["full_res"]
-                    # The composite path is not conversationally refined — editing
-                    # would reintroduce content into the guaranteed-empty margins.
-                    st.session_state.thread = []
-                    assets.save_generated_banner(platform or "", category, sku, variant, result["full_res"])
-                    st.success(f"{platform} banner composited to spec and saved to cloud storage.")
-                else:
-                    st.session_state.composite_result = None
-                    st.session_state.current_image = img
-                    # Start a fresh conversation thread with this banner.
-                    initial_prompt = user_prompt.strip() or f"Generate a banner for {sku}."
-                    st.session_state.thread = [{"prompt": initial_prompt, "image": img}]
-                    # Save grouped by platform so the Gallery can drill down by platform.
-                    assets.save_generated_banner(platform or "", category, sku, variant, img)
-                    st.success("Banner generated and saved to cloud storage.")
+                st.session_state.current_image = img
+                # Start a fresh conversation thread with this banner.
+                initial_prompt = user_prompt.strip() or f"Generate a banner for {sku}."
+                st.session_state.thread = [{"prompt": initial_prompt, "image": img}]
+                # Save grouped by platform so the Gallery can drill down by platform.
+                assets.save_generated_banner(platform or "", category, sku, variant, img)
+                st.success("Banner generated and saved to cloud storage.")
             except Exception as exc:
                 st.error(f"Generation failed: {exc}")
 
     sku_slug = sku.replace(" ", "_").lower()
-
-    # Strict-composite deliverable (e.g. Blinkit): show the spec-compliant PNG
-    # with both the upload-ready size and the hi-res canvas to download.
-    comp = st.session_state.get("composite_result")
-    if comp:
-        st.divider()
-        st.markdown(f"**{comp['platform']} deliverable**")
-        fw, fh = comp["final_size"]
-        cw, ch = comp["canvas_size"]
-        st.caption(
-            "All content sits inside the centred safe area; the background "
-            "extends seamlessly to the edges so it reads as one banner. Upload "
-            "the exact-size PNG to the ad slot."
-        )
-        st.image(comp["deliverable"], caption=f"{fw}x{fh} (as delivered)", width=_preview_width(fw, fh))
-        comp_slug = comp["sku"].replace(" ", "_").lower()
-        dl_a, dl_b = st.columns(2)
-        with dl_a:
-            st.download_button(
-                f"Download {fw}x{fh} (upload this)",
-                data=comp["deliverable"],
-                file_name=f"godesi_{comp_slug}_{fw}x{fh}.png",
-                mime="image/png",
-                type="primary",
-                use_container_width=True,
-                key="composite_dl_deliverable",
-            )
-        with dl_b:
-            st.download_button(
-                f"Download {cw}x{ch} (hi-res)",
-                data=comp["full_res"],
-                file_name=f"godesi_{comp_slug}_{cw}x{ch}.png",
-                mime="image/png",
-                type="secondary",
-                use_container_width=True,
-                key="composite_dl_full",
-            )
 
     # The session as a scrolling conversation thread. Each round
     # shows the user's prompt/instruction, then the resulting banner (capped
@@ -788,7 +718,6 @@ def _screen_create_carousel(catalog, category, products):
                 design_elements_named = assets.load_design_elements_named()
                 platform = shared["platform"]
                 platform_notes = assets.load_platform_notes(platform) if platform else ""
-                composite = engine.composite_spec(platform) if platform else None
                 set_tag = f"carousel{int(time.time())}"
 
                 outputs = []
@@ -831,25 +760,13 @@ def _screen_create_carousel(catalog, category, products):
                             design_elements_bw=config.DESIGN_ELEMENTS_ARE_BW,
                             carousel_reference=carousel_reference,
                             reserve_top=reserve_top,
-                            composite=composite,
                         )
                         img = engine.generate_from_payload(payload["brief"], payload["images"])
                         if carousel_reference is None:
-                            # First successful page becomes the style reference. On
-                            # composite platforms this is the raw content frame, so
-                            # later pages match the composition, not the padding.
+                            # First successful page becomes the style reference.
                             carousel_reference = img
-                        if composite:
-                            result = engine.composite_final(img, composite)
-                            outputs.append({
-                                "product": product,
-                                "data": result["deliverable"],
-                                "full_res": result["full_res"],
-                            })
-                            assets.save_generated_banner(platform or "", category, product, None, result["full_res"], tag=set_tag)
-                        else:
-                            outputs.append({"product": product, "data": img})
-                            assets.save_generated_banner(platform or "", category, product, None, img, tag=set_tag)
+                        outputs.append({"product": product, "data": img})
+                        assets.save_generated_banner(platform or "", category, product, None, img, tag=set_tag)
                     except Exception as exc:
                         failed.append(product)
 
@@ -893,20 +810,6 @@ def _screen_create_carousel(catalog, category, products):
                             type="primary",
                             use_container_width=True,
                         )
-                        if out.get("full_res"):
-                            # Composite platforms: offer the hi-res canvas too, and
-                            # skip Enhance — editing would put content back into the
-                            # guaranteed-empty padding.
-                            st.download_button(
-                                "Download hi-res",
-                                data=out["full_res"],
-                                file_name=f"godesi_{out['product'].replace(' ', '_').lower()}_hires.png",
-                                mime="image/png",
-                                key=_widget_key("carousel_dl_full", out["product"]),
-                                type="secondary",
-                                use_container_width=True,
-                            )
-                            continue
                         # Enhance this specific banner (applies to it in place, so
                         # its Download and the ZIP reflect the new version).
                         enh = st.text_input(

@@ -796,6 +796,12 @@ def load_sku_image(sku: str, variant: str | None = None) -> bytes | None:
 _GENERATED_FOLDER = "generated"
 _UNCATEGORIZED = "uncategorized"
 
+# Carousels are grouped as a SET under
+# generated/<platform-slug>/carousels/<carousel_id>/ — the individual cards plus
+# a small set.json record. Single banners keep saving as loose files.
+_CAROUSELS_FOLDER = "carousels"
+_SET_RECORD_FILE = "set.json"
+
 
 _GALLERY_UNKNOWN = "Unknown"
 
@@ -829,25 +835,142 @@ def save_generated_banner(platform: str, category: str, sku: str, variant: str |
     load_generated_banners.clear()
 
 
+def save_carousel_banners(platform: str, category: str, cards: list, carousel_id: str) -> dict:
+    """Save a carousel as a grouped SET, not loose files.
+
+    Layout: generated/<platform-slug>/carousels/<carousel_id>/ holding the
+    individual cards (NN_<product>_<ms>.png) plus a set.json record describing
+    the set (platform, category, products, timestamp, carousel_id). `cards` is a
+    list of {"product", "variant"(optional), "data"} in display order.
+
+    Each card carries object metadata (platform/category/product/variant plus
+    carousel_id, carousel_index, carousel_ts) so the Gallery can group and order
+    the set from a single list call. Returns {folder, carousel_id}.
+    """
+    platform_slug = _slug(platform) if platform else _UNCATEGORIZED
+    cid = _slug(carousel_id)
+    folder = f"{_GENERATED_FOLDER}/{platform_slug}/{_CAROUSELS_FOLDER}/{cid}"
+    ts_ms = int(time.time() * 1000)
+
+    products: list[str] = []
+    for index, card in enumerate(cards):
+        product = card.get("product") or ""
+        variant = card.get("variant")
+        base = _sku_image_basename(product, variant) if product else f"card_{index}"
+        filename = f"{index:02d}_{base}_{ts_ms}.png"
+        storage.upload_image(
+            folder,
+            filename,
+            card["data"],
+            content_type="image/png",
+            metadata={
+                "platform": platform or "",
+                "category": category or "",
+                "product": product,
+                "variant": variant or "",
+                "carousel_id": cid,
+                "carousel_index": index,
+                "carousel_ts": ts_ms,
+            },
+        )
+        products.append(product)
+
+    record = {
+        "carousel_id": cid,
+        "platform": platform or "",
+        "category": category or "",
+        "products": products,
+        "timestamp": ts_ms,
+        "count": len(cards),
+    }
+    storage.upload_image(
+        folder,
+        _SET_RECORD_FILE,
+        json.dumps(record, indent=2).encode("utf-8"),
+        content_type="application/json",
+        metadata={
+            "kind": "carousel_set",
+            "carousel_id": cid,
+            "platform": platform or "",
+            "category": category or "",
+            "carousel_ts": ts_ms,
+        },
+    )
+    load_generated_banners.clear()
+    load_generated_image.clear()
+    return {"folder": folder, "carousel_id": cid}
+
+
 @st.cache_data(show_spinner=False)
 def load_generated_banners() -> list[dict]:
-    """Flat list of generated banners for the Gallery (ONE GCS list call).
+    """Gallery items for the Gallery, from ONE GCS list call. Newest-first.
 
-    Each item: {folder, file, updated, platform, category, product} with display
-    labels resolved from object metadata, falling back to the folder path, and
-    "Unknown" for anything missing. Sorted newest-first.
+    Returns a MIX of two item shapes:
+      single:   {type:"single", folder, file, updated, platform, category, product}
+      carousel: {type:"carousel", carousel_id, folder, updated, platform,
+                 category, products:[...], count, cards:[{folder,file,updated,
+                 product,index}, ...]}
+
+    A blob is treated as a carousel card when it lives under
+    <platform-slug>/carousels/<carousel_id>/; those are grouped into one item and
+    ordered by carousel_index. Its set.json record is skipped. Everything else —
+    including OLD carousels that were saved as loose files before grouping —
+    surfaces as an individual single item, exactly as before.
     """
     meta = storage.list_blobs_meta(_GENERATED_FOLDER)
     plat_label = {_slug(p): p for p in load_platforms()}
     cat_label = {_slug(c): c for c in load_catalog().keys()}
 
-    banners: list[dict] = []
+    singles: list[dict] = []
+    carousels: dict[str, dict] = {}
+
     for entry in meta:
         parts = entry["name"].split("/")
         file = parts[-1]
         folder = _GENERATED_FOLDER + ("/" + "/".join(parts[:-1]) if len(parts) > 1 else "")
         md = entry.get("metadata") or {}
+        updated = entry["updated"]
 
+        # Carousel card: generated/<platform-slug>/carousels/<carousel_id>/<file>
+        if len(parts) >= 4 and parts[1] == _CAROUSELS_FOLDER:
+            if file == _SET_RECORD_FILE:
+                continue  # the set record, not a card
+            cid = md.get("carousel_id") or parts[2]
+            platform = md.get("platform") or plat_label.get(parts[0]) or _GALLERY_UNKNOWN
+            category = md.get("category") or _GALLERY_UNKNOWN
+            product = md.get("product") or _GALLERY_UNKNOWN
+            try:
+                index = int(md.get("carousel_index"))
+            except (TypeError, ValueError):
+                index = 9999
+
+            grp = carousels.get(cid)
+            if grp is None:
+                grp = {
+                    "type": "carousel",
+                    "carousel_id": cid,
+                    "folder": folder,
+                    "platform": platform,
+                    "category": category,
+                    "updated": updated,
+                    "cards": [],
+                }
+                carousels[cid] = grp
+            grp["cards"].append({
+                "folder": folder,
+                "file": file,
+                "updated": updated,
+                "product": product,
+                "index": index,
+            })
+            grp["updated"] = max(grp["updated"], updated)
+            if grp["platform"] == _GALLERY_UNKNOWN and platform != _GALLERY_UNKNOWN:
+                grp["platform"] = platform
+            if grp["category"] == _GALLERY_UNKNOWN and category != _GALLERY_UNKNOWN:
+                grp["category"] = category
+            continue
+
+        # Single banner (loose file) — resolve labels from metadata/path.
         platform = md.get("platform")
         if not platform:
             platform = plat_label.get(parts[0]) if len(parts) >= 2 else None
@@ -860,17 +983,31 @@ def load_generated_banners() -> list[dict]:
 
         product = md.get("product") or _GALLERY_UNKNOWN
 
-        banners.append({
+        singles.append({
+            "type": "single",
             "folder": folder,
             "file": file,
-            "updated": entry["updated"],
+            "updated": updated,
             "platform": platform,
             "category": category,
             "product": product,
         })
 
-    banners.sort(key=lambda b: b["updated"], reverse=True)
-    return banners
+    items: list[dict] = list(singles)
+    for grp in carousels.values():
+        if not grp["cards"]:
+            continue
+        grp["cards"].sort(key=lambda c: (c["index"], c["updated"]))
+        ordered_products: list[str] = []
+        for c in grp["cards"]:
+            if c["product"] not in ordered_products:
+                ordered_products.append(c["product"])
+        grp["products"] = ordered_products
+        grp["count"] = len(grp["cards"])
+        items.append(grp)
+
+    items.sort(key=lambda it: it["updated"], reverse=True)
+    return items
 
 
 @st.cache_data(show_spinner=False)
@@ -884,3 +1021,113 @@ def delete_generated_banner(folder: str, file: str) -> bool:
     load_generated_banners.clear()
     load_generated_image.clear()
     return deleted
+
+
+def delete_carousel(folder: str, files: list[str]) -> int:
+    """Delete a whole carousel set: every card plus its set.json record."""
+    removed = 0
+    for file in files:
+        if storage.delete_image(folder, file):
+            removed += 1
+    storage.delete_image(folder, _SET_RECORD_FILE)
+    load_generated_banners.clear()
+    load_generated_image.clear()
+    return removed
+
+
+# ---------------------------------------------------------------------------
+# CTR metrics logging (brand/metrics.json)
+#
+# A single JSON object mapping creative_id -> a logged record. A "creative" is
+# whatever ran as ONE ad: a single banner (its own id) or a carousel SET (its
+# carousel_id, one CTR for the whole set). Purely a log for now — nothing reads
+# it during generation.
+# ---------------------------------------------------------------------------
+_METRICS_FILE = "metrics.json"
+
+
+def creative_identity(item: dict) -> dict:
+    """Stable identity + display fields for a Gallery item (single or carousel).
+
+    creative_id: a carousel uses its carousel_id; a single uses its blob path
+    ("<folder>/<file>") — the two never collide (carousel_ids carry no slash).
+    Also returns a thumbnail source so a logged row can show a preview even if
+    the creative is later filtered away.
+    """
+    if item.get("type") == "carousel":
+        first = item["cards"][0] if item.get("cards") else {}
+        return {
+            "creative_id": item["carousel_id"],
+            "type": "carousel",
+            "platform": item.get("platform", _GALLERY_UNKNOWN),
+            "category": item.get("category", _GALLERY_UNKNOWN),
+            "product": ", ".join(item.get("products", [])),
+            "label": f"Carousel · {item.get('count', len(item.get('cards', [])))} cards",
+            "thumb_folder": first.get("folder"),
+            "thumb_file": first.get("file"),
+        }
+    return {
+        "creative_id": f"{item['folder']}/{item['file']}",
+        "type": "single",
+        "platform": item.get("platform", _GALLERY_UNKNOWN),
+        "category": item.get("category", _GALLERY_UNKNOWN),
+        "product": item.get("product", _GALLERY_UNKNOWN),
+        "label": item.get("product", _GALLERY_UNKNOWN),
+        "thumb_folder": item["folder"],
+        "thumb_file": item["file"],
+    }
+
+
+@st.cache_data(show_spinner=False)
+def load_metrics() -> dict:
+    """The full creative_id -> record map from brand/metrics.json ({} if none)."""
+    data = storage.get_image("brand", _METRICS_FILE)
+    if not data:
+        return {}
+    try:
+        parsed = json.loads(data.decode("utf-8"))
+    except Exception:
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
+
+
+def save_metric(creative_id: str, record: dict) -> None:
+    """Insert or overwrite the CTR record for one creative, then persist."""
+    metrics = load_metrics()
+    metrics[str(creative_id)] = record
+    storage.upload_image(
+        "brand",
+        _METRICS_FILE,
+        json.dumps(metrics, indent=2, ensure_ascii=False).encode("utf-8"),
+        content_type="application/json",
+    )
+    load_metrics.clear()
+
+
+def load_category_winners(category: str, limit: int) -> list[tuple]:
+    """Top-CTR logged creatives from ONE category, as [(label, bytes)].
+
+    Highest CTR first, capped to `limit`. STRICTLY same-category — a record only
+    qualifies if its logged `category` equals `category`. Only creatives with a
+    logged CTR (i.e. present in metrics.json) are eligible; returns [] when none
+    exist for the category, so the caller can no-op cleanly.
+    """
+    if not category or limit <= 0:
+        return []
+    metrics = load_metrics()
+    same = [m for m in metrics.values() if m.get("category") == category]
+    same.sort(key=lambda m: float(m.get("ctr", 0.0) or 0.0), reverse=True)
+
+    winners: list[tuple] = []
+    for m in same:
+        if len(winners) >= limit:
+            break
+        folder, file = m.get("thumb_folder"), m.get("thumb_file")
+        if not (folder and file):
+            continue
+        data = load_generated_image(folder, file)
+        if not data:
+            continue
+        name = m.get("label") or m.get("product") or "Creative"
+        winners.append((f"{name} (CTR {float(m.get('ctr', 0.0) or 0.0):.2f}%)", data))
+    return winners

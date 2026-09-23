@@ -9,6 +9,7 @@ import hmac
 import io
 import time
 import zipfile
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import streamlit as st
 
 import assets
@@ -268,7 +269,7 @@ with st.sidebar:
     st.markdown("### GO Desi Banner Studio")
     # Simple button-based navigation to make the sidebar feel intentional
     st.session_state.setdefault("screen_mode", "Create banner")
-    for label in ["Create banner", "Gallery", "Manage Products", "Rules & Assets"]:
+    for label in ["Create banner", "Gallery", "Data logging", "Manage Products", "Rules & Assets"]:
         is_active = st.session_state.get("screen_mode") == label
         # Active tab renders red (primary); the others render as normal buttons.
         if st.button(
@@ -379,25 +380,6 @@ def _screen_create_single(catalog, category, products):
     platform_no_button = assets.load_platform_no_button(platform) if platform else False
     platform_button = assets.load_platform_button(platform) if platform else None
 
-    include_button = st.checkbox(
-        "Include Order Now button",
-        value=True,
-        help="When off, no Order Now / CTA button is baked into the banner.",
-    )
-    # Effective: no button if the platform supplies its own CTA OR the user
-    # turned the toggle off.
-    no_button = platform_no_button or not include_button
-
-    if platform and no_button:
-        st.caption(f"{platform} uses its own CTA — no Order Now button is added to the banner.")
-    elif platform and platform_button:
-        st.caption(f"The {platform} Order Now button will be placed on the banner.")
-    elif platform:
-        st.caption(
-            f"No Order Now button uploaded for {platform}. Add one under "
-            "Rules & Assets → Platforms, or its notes will still be applied."
-        )
-
     # Some platforms (e.g. Meta) are pinned to a fixed size — the selector is
     # hidden and one banner is generated at that size. Others use the selector.
     fixed_size = assets.platform_fixed_size(platform) if platform else None
@@ -443,6 +425,11 @@ def _screen_create_single(catalog, category, products):
         list(_COPY_MODES.keys()),
         index=0,
         horizontal=True,
+        help=(
+            "Write my own: the exact words you type appear on the banner. "
+            "No copy: no headline or text is added. "
+            "Generate copy: the model writes a short on-brand headline itself."
+        ),
     )
     copy_mode = _COPY_MODES[copy_mode_label]
     banner_copy = ""
@@ -453,10 +440,6 @@ def _screen_create_single(catalog, category, products):
             placeholder="Exact words to appear on the banner, rendered exactly as written.",
             label_visibility="collapsed",
         )
-    elif copy_mode == "none":
-        st.caption("No headline or copy text will be added to the banner.")
-    else:
-        st.caption("The model will write a short on-brand headline itself.")
 
     include_logo = st.checkbox(
         "Include GO DESi logo at top",
@@ -471,10 +454,44 @@ def _screen_create_single(catalog, category, products):
     reserve_top = st.checkbox(
         "Leave top 40% empty for copy",
         value=False,
-        help="Keeps the top ~40% clean so copy can be added later. AI headline copy is turned off.",
+        help=(
+            "Keeps the top ~40% clean so copy can be added later. AI headline copy "
+            "is turned off — the top band is reserved for copy to be added later."
+        ),
     )
-    if reserve_top:
-        st.caption("Headline copy is left off — the top band is reserved for copy to be added later.")
+
+    include_button = st.checkbox(
+        "Include Order Now button",
+        value=True,
+        help=(
+            "When on, the platform's Order Now button is placed on the banner (if "
+            "one is uploaded under Rules & Assets → Platforms). When off — or when "
+            "the platform supplies its own CTA — no button is baked in."
+        ),
+    )
+    # Effective: no button if the platform supplies its own CTA OR the user
+    # turned the toggle off.
+    no_button = platform_no_button or not include_button
+
+    influence_winners = st.checkbox(
+        "Get influenced by top-performing creatives",
+        value=False,
+        help=(
+            "When on, the highest-CTR logged creatives from THIS category are sent "
+            "as soft inspiration (never copied). No effect if none are logged."
+        ),
+    )
+    experimental = st.checkbox(
+        "Experimental mode (looser rules, prompt leads)",
+        value=False,
+        help=(
+            "Demotes the stylistic brand rules to optional guidelines so your "
+            "prompt leads. Safety rules (no invented offers, faithful product/pack, "
+            "logo untouched) still apply. Produces less predictable, less "
+            "consistently on-brand output — for trying new directions, not routine "
+            "banners."
+        ),
+    )
 
     if st.button("Generate banner", type="primary", use_container_width=True):
         with st.spinner("Designing the banner..."):
@@ -486,6 +503,11 @@ def _screen_create_single(catalog, category, products):
                 reference_named = assets.load_reference_images_named(category)
                 design_elements_named = assets.load_design_elements_named()
                 platform_notes = assets.load_platform_notes(platform) if platform else ""
+                # Same-category CTR winners as soft influence, only when toggled on.
+                winner_images = (
+                    assets.load_category_winners(category, config.MAX_WINNERS_PER_CALL)
+                    if influence_winners else []
+                )
 
                 payload = engine.assemble_payload(
                     brand_rules=brand_rules,
@@ -509,6 +531,8 @@ def _screen_create_single(catalog, category, products):
                     no_button=no_button,
                     design_elements_bw=config.DESIGN_ELEMENTS_ARE_BW,
                     reserve_top=reserve_top,
+                    winner_images=winner_images,
+                    experimental=experimental,
                 )
                 img = engine.generate_from_payload(payload["brief"], payload["images"])
                 st.session_state.last_brief = payload["brief"]
@@ -596,26 +620,6 @@ def _platform_size_prompt_inputs(category: str, label_for_prompt: str, key_prefi
     platform_no_button = assets.load_platform_no_button(platform) if platform else False
     platform_button = assets.load_platform_button(platform) if platform else None
 
-    include_button = st.checkbox(
-        "Include Order Now button",
-        value=True,
-        key=_widget_key(key_prefix, "include_button"),
-        help="When off, no Order Now / CTA button is baked into any banner.",
-    )
-    # Effective: no button if the platform supplies its own CTA OR the user
-    # turned the toggle off.
-    no_button = platform_no_button or not include_button
-
-    if platform and no_button:
-        st.caption(f"{platform} uses its own CTA — no Order Now button is added to the banner.")
-    elif platform and platform_button:
-        st.caption(f"The {platform} Order Now button will be placed on the banner.")
-    elif platform:
-        st.caption(
-            f"No Order Now button uploaded for {platform}. Add one under "
-            "Rules & Assets → Platforms, or its notes will still be applied."
-        )
-
     fixed_size = assets.platform_fixed_size(platform) if platform else None
     if fixed_size:
         size_label, dimensions = fixed_size
@@ -651,7 +655,9 @@ def _platform_size_prompt_inputs(category: str, label_for_prompt: str, key_prefi
     )
     return {
         "platform": platform,
-        "no_button": no_button,
+        # Platform's own default; the caller applies the "Include Order Now
+        # button" toggle to get the effective no_button.
+        "platform_no_button": platform_no_button,
         "platform_button": platform_button,
         "size_label": size_label,
         "dimensions": dimensions,
@@ -669,19 +675,26 @@ def _screen_create_carousel(catalog, category, products):
 
     shared = _platform_size_prompt_inputs(category, "the products", "carousel")
 
-    copy_mode = _COPY_MODES[st.radio("Banner copy", list(_COPY_MODES.keys()), index=0, horizontal=True, key="carousel_copymode")]
+    copy_mode = _COPY_MODES[st.radio(
+        "Banner copy",
+        list(_COPY_MODES.keys()),
+        index=0,
+        horizontal=True,
+        key="carousel_copymode",
+        help=(
+            "Write my own: type copy per product below (blank auto-generates that "
+            "one). No copy: no headline or text is added to any banner. "
+            "Generate copy: the model writes a short on-brand headline for each."
+        ),
+    )]
     per_product_copy = {}
     if copy_mode == "own":
-        st.caption("Optional copy per product — leave blank to auto-generate that one.")
         for product in selected_products:
             per_product_copy[product] = st.text_input(
                 f"Copy for {product}",
                 key=_widget_key("carousel_copy", category, product),
+                placeholder="Leave blank to auto-generate this one.",
             )
-    elif copy_mode == "none":
-        st.caption("No headline or copy text will be added to any banner.")
-    else:
-        st.caption("The model will write a short on-brand headline for each banner.")
 
     include_logo = st.checkbox(
         "Include GO DESi logo at top",
@@ -699,93 +712,189 @@ def _screen_create_carousel(catalog, category, products):
         "Leave top 40% empty for copy",
         value=False,
         key="carousel_reserve_top",
-        help="Keeps the top ~40% clean so copy can be added later. AI headline copy is turned off.",
+        help=(
+            "Keeps the top ~40% clean so copy can be added later. AI headline copy "
+            "is turned off — the top band is reserved for copy to be added later."
+        ),
     )
-    if reserve_top:
-        st.caption("Headline copy is left off — the top band is reserved for copy to be added later.")
+
+    include_button = st.checkbox(
+        "Include Order Now button",
+        value=True,
+        key="carousel_include_button",
+        help=(
+            "When on, the platform's Order Now button is placed on each banner (if "
+            "one is uploaded under Rules & Assets → Platforms). When off — or when "
+            "the platform supplies its own CTA — no button is baked in."
+        ),
+    )
+    # Effective: no button if the platform supplies its own CTA OR the user
+    # turned the toggle off.
+    no_button = shared["platform_no_button"] or not include_button
+
+    influence_winners = st.checkbox(
+        "Get influenced by top-performing creatives",
+        value=False,
+        key="carousel_influence_winners",
+        help=(
+            "When on, the highest-CTR logged creatives from THIS category are sent "
+            "as soft inspiration (never copied). No effect if none are logged."
+        ),
+    )
+    experimental = st.checkbox(
+        "Experimental mode (looser rules, prompt leads)",
+        value=False,
+        key="carousel_experimental",
+        help=(
+            "Demotes the stylistic brand rules to optional guidelines so your "
+            "prompt leads. Safety rules (no invented offers, faithful product/pack, "
+            "logo untouched) still apply. Produces less predictable, less "
+            "consistently on-brand output — for trying new directions, not routine "
+            "banners."
+        ),
+    )
 
     ready = len(selected_products) >= 2
     if not ready:
         st.info("Select at least two products for a carousel.")
 
     if st.button("Generate carousel", type="primary", use_container_width=True, disabled=not ready):
-        with st.spinner(f"Designing {len(selected_products)} banners..."):
-            try:
-                brand_rules = assets.load_brand_rules_text()
-                logo_image = assets.load_logo()
-                logo_notes = assets.load_logo_notes()
-                reference_named = assets.load_reference_images_named(category)
-                design_elements_named = assets.load_design_elements_named()
-                platform = shared["platform"]
-                platform_notes = assets.load_platform_notes(platform) if platform else ""
-                set_tag = f"carousel{int(time.time())}"
+        total = len(selected_products)
+        progress = st.progress(0.0, text=f"Preparing {total} banners...")
+        try:
+            brand_rules = assets.load_brand_rules_text()
+            logo_image = assets.load_logo()
+            logo_notes = assets.load_logo_notes()
+            reference_named = assets.load_reference_images_named(category)
+            design_elements_named = assets.load_design_elements_named()
+            platform = shared["platform"]
+            platform_notes = assets.load_platform_notes(platform) if platform else ""
+            set_tag = f"carousel{int(time.time())}"
+            # Same-category CTR winners as soft influence (once for the whole run).
+            winner_images = (
+                assets.load_category_winners(category, config.MAX_WINNERS_PER_CALL)
+                if influence_winners else []
+            )
 
-                outputs = []
-                failed = []
-                carousel_reference = None
-                for product in selected_products:
-                    # Each product is isolated: a transient failure on one does
-                    # not discard the banners already generated.
-                    try:
-                        # Use this product's packaging image (product level).
-                        imgs = assets.list_sku_images(product, None)
-                        packs = [e for e in imgs if e["role"] == "packaging"] or imgs
-                        product_images = []
-                        if packs:
-                            data = assets.load_sku_image_data(packs[0]["folder"], packs[0]["file"])
-                            if data:
-                                product_images = [{"role": "packaging", "data": data, "label": "Packaging"}]
+            # Prefetch each product's packaging image on the MAIN thread — the
+            # cached asset loaders touch Streamlit, so they must not run inside
+            # worker threads. Workers below only call the pure engine functions.
+            product_images_by_product: dict = {}
+            for product in selected_products:
+                imgs = assets.list_sku_images(product, None)
+                packs = [e for e in imgs if e["role"] == "packaging"] or imgs
+                product_images = []
+                if packs:
+                    data = assets.load_sku_image_data(packs[0]["folder"], packs[0]["file"])
+                    if data:
+                        product_images = [{"role": "packaging", "data": data, "label": "Packaging"}]
+                product_images_by_product[product] = product_images
 
-                        banner_copy = per_product_copy.get(product, "") if copy_mode == "own" else ""
-                        payload = engine.assemble_payload(
-                            brand_rules=brand_rules,
-                            category=category,
-                            sku=product,
-                            variant=None,
-                            user_prompt=shared["user_prompt"],
-                            size_label=shared["size_label"],
-                            dimensions=shared["dimensions"],
-                            banner_copy=banner_copy,
-                            copy_mode=copy_mode,
-                            logo_image=logo_image,
-                            logo_notes=logo_notes,
-                            include_logo=include_logo,
-                            design_elements=design_elements_named if include_design_elements else [],
-                            reference_images=reference_named,
-                            product_images=product_images,
-                            platform=platform or "",
-                            platform_notes=platform_notes,
-                            platform_button=shared["platform_button"],
-                            no_button=shared["no_button"],
-                            design_elements_bw=config.DESIGN_ELEMENTS_ARE_BW,
-                            carousel_reference=carousel_reference,
-                            reserve_top=reserve_top,
-                        )
-                        img = engine.generate_from_payload(payload["brief"], payload["images"])
-                        if carousel_reference is None:
-                            # First successful page becomes the style reference.
-                            carousel_reference = img
-                        outputs.append({"product": product, "data": img})
-                        assets.save_generated_banner(platform or "", category, product, None, img, tag=set_tag)
-                    except Exception as exc:
-                        failed.append(product)
+            def _make_banner(product: str, reference: bytes | None) -> bytes:
+                """Pure generation for one product (safe to run off the main thread)."""
+                banner_copy = per_product_copy.get(product, "") if copy_mode == "own" else ""
+                payload = engine.assemble_payload(
+                    brand_rules=brand_rules,
+                    category=category,
+                    sku=product,
+                    variant=None,
+                    user_prompt=shared["user_prompt"],
+                    size_label=shared["size_label"],
+                    dimensions=shared["dimensions"],
+                    banner_copy=banner_copy,
+                    copy_mode=copy_mode,
+                    logo_image=logo_image,
+                    logo_notes=logo_notes,
+                    include_logo=include_logo,
+                    design_elements=design_elements_named if include_design_elements else [],
+                    reference_images=reference_named,
+                    product_images=product_images_by_product.get(product, []),
+                    platform=platform or "",
+                    platform_notes=platform_notes,
+                    platform_button=shared["platform_button"],
+                    no_button=no_button,
+                    design_elements_bw=config.DESIGN_ELEMENTS_ARE_BW,
+                    carousel_reference=reference,
+                    reserve_top=reserve_top,
+                    winner_images=winner_images,
+                    experimental=experimental,
+                )
+                return engine.generate_from_payload(payload["brief"], payload["images"])
 
-                st.session_state.carousel_outputs = outputs
-                if outputs and failed:
-                    st.warning(
-                        f"Generated {len(outputs)} of {len(selected_products)}. "
-                        f"Failed (likely a temporary Gemini timeout): {', '.join(failed)}. "
-                        "Re-run to retry just those."
+            results_by_index: dict = {}
+            failed = []
+            done = 0
+
+            # Make banners in order until one succeeds — that first success is the
+            # style reference every remaining banner matches.
+            carousel_reference = None
+            index = 0
+            while carousel_reference is None and index < total:
+                product = selected_products[index]
+                progress.progress((done + 0.5) / total, text=f"Designing banner 1 of {total} (style reference)...")
+                try:
+                    img = _make_banner(product, None)
+                    carousel_reference = img
+                    results_by_index[index] = {"product": product, "data": img}
+                except Exception:
+                    failed.append(product)
+                done += 1
+                index += 1
+                progress.progress(done / total, text=f"Designed {done} of {total}...")
+
+            # Fan the rest out in parallel, all matched to the reference. Each is
+            # isolated: one failure never discards the others.
+            rest = [(i, selected_products[i]) for i in range(index, total)]
+            if rest and carousel_reference is not None:
+                workers = max(1, min(getattr(config, "CAROUSEL_MAX_PARALLEL", 4), len(rest)))
+                with ThreadPoolExecutor(max_workers=workers) as executor:
+                    futures = {
+                        executor.submit(_make_banner, product, carousel_reference): (i, product)
+                        for i, product in rest
+                    }
+                    for future in as_completed(futures):
+                        i, product = futures[future]
+                        try:
+                            results_by_index[i] = {"product": product, "data": future.result()}
+                        except Exception:
+                            failed.append(product)
+                        done += 1
+                        progress.progress(done / total, text=f"Designed {done} of {total}...")
+
+            # Keep the selected order (parallel completion is out of order).
+            outputs = [results_by_index[i] for i in sorted(results_by_index)]
+            progress.empty()
+
+            # Save the whole run as ONE grouped carousel set (folder), not loose
+            # files, so the Gallery shows it as a single carousel card.
+            if outputs:
+                try:
+                    assets.save_carousel_banners(
+                        platform or "",
+                        category,
+                        [{"product": o["product"], "data": o["data"]} for o in outputs],
+                        carousel_id=set_tag,
                     )
-                elif outputs:
-                    st.success(f"Generated {len(outputs)} banners and saved to cloud storage.")
-                else:
-                    st.error(
-                        "All generations failed — Gemini looks temporarily overloaded. "
-                        "Wait a moment and try again."
-                    )
-            except Exception as exc:
-                st.error(f"Generation failed: {exc}")
+                except Exception as exc:
+                    st.warning(f"Generated the banners but saving the set to cloud storage failed: {exc}")
+
+            st.session_state.carousel_outputs = outputs
+            if outputs and failed:
+                st.warning(
+                    f"Generated {len(outputs)} of {len(selected_products)}. "
+                    f"Failed (likely a temporary Gemini timeout): {', '.join(failed)}. "
+                    "Re-run to retry just those."
+                )
+            elif outputs:
+                st.success(f"Generated {len(outputs)} banners and saved to cloud storage.")
+            else:
+                st.error(
+                    "All generations failed — Gemini looks temporarily overloaded. "
+                    "Wait a moment and try again."
+                )
+        except Exception as exc:
+            progress.empty()
+            st.error(f"Generation failed: {exc}")
 
     outputs = st.session_state.get("carousel_outputs")
     if outputs:
@@ -847,38 +956,171 @@ def _screen_create_carousel(catalog, category, products):
 _GALLERY_PAGE_SIZE = 12
 
 
+def _item_products(item: dict) -> list:
+    """Products represented by a gallery item (a list, for carousels)."""
+    if item.get("type") == "carousel":
+        return item.get("products", [])
+    return [item.get("product", "")]
+
+
+def _render_single_card(item: dict) -> None:
+    data = assets.load_generated_image(item["folder"], item["file"])
+    if not data:
+        st.caption("(image unavailable)")
+        return
+    st.image(data, use_container_width=True)
+    st.caption(f"{item['product']} · {item['category']}")
+    st.download_button(
+        "Download",
+        data=data,
+        file_name=item["file"],
+        mime="image/png",
+        key=_widget_key("gal_dl", item["folder"], item["file"]),
+        type="primary",
+        use_container_width=True,
+    )
+    if _confirm_delete(
+        _widget_key("gal_del", item["folder"], item["file"]),
+        "Remove this banner?",
+        label="Remove",
+    ):
+        assets.delete_generated_banner(item["folder"], item["file"])
+        st.toast("Banner removed.")
+        st.rerun()
+
+
+def _render_carousel_card(item: dict) -> None:
+    """A single folder-style card standing in for the whole carousel set."""
+    cover = None
+    if item["cards"]:
+        first = item["cards"][0]
+        cover = assets.load_generated_image(first["folder"], first["file"])
+    if cover:
+        st.image(cover, use_container_width=True)
+    else:
+        st.caption("(preview unavailable)")
+    st.caption(f"Carousel · {item['count']} cards")
+    st.caption(f"{item['platform']} · {item['category']}")
+    if st.button(
+        "Open carousel",
+        key=_widget_key("gal_open", item["carousel_id"]),
+        type="primary",
+        use_container_width=True,
+    ):
+        st.session_state.gallery_open_carousel = item["carousel_id"]
+        st.rerun()
+
+
+def _render_open_carousel(item: dict) -> None:
+    """Expanded view of one carousel: back control + each card downloadable."""
+    if st.button("Back to gallery", key="gal_carousel_back", type="secondary"):
+        st.session_state.gallery_open_carousel = None
+        st.rerun()
+
+    st.subheader(f"Carousel · {item['count']} cards")
+    st.caption(f"{item['platform']} · {item['category']}")
+
+    loaded = [(c, assets.load_generated_image(c["folder"], c["file"])) for c in item["cards"]]
+    present = [(c, d) for c, d in loaded if d]
+    if present:
+        st.download_button(
+            "Download all (ZIP)",
+            data=_zip_named([(c["product"], d) for c, d in present]),
+            file_name=f"godesi_carousel_{item['carousel_id']}.zip",
+            mime="application/zip",
+            type="secondary",
+            use_container_width=True,
+            key="gal_carousel_zip",
+        )
+
+    per_row = 3
+    for i in range(0, len(loaded), per_row):
+        cols = st.columns(per_row)
+        for col, (card, data) in zip(cols, loaded[i : i + per_row]):
+            with col:
+                with st.container(border=True):
+                    if not data:
+                        st.caption("(image unavailable)")
+                        continue
+                    st.image(data, use_container_width=True)
+                    st.caption(card["product"])
+                    st.download_button(
+                        "Download",
+                        data=data,
+                        file_name=card["file"],
+                        mime="image/png",
+                        key=_widget_key("gal_card_dl", card["folder"], card["file"]),
+                        type="primary",
+                        use_container_width=True,
+                    )
+                    if _confirm_delete(
+                        _widget_key("gal_card_del", card["folder"], card["file"]),
+                        "Remove this card?",
+                        label="Remove",
+                    ):
+                        assets.delete_generated_banner(card["folder"], card["file"])
+                        st.toast("Card removed.")
+                        st.rerun()
+
+    st.divider()
+    if _confirm_delete(
+        "gal_carousel_del_all",
+        "Delete the entire carousel and all its cards?",
+        label="Delete entire carousel",
+    ):
+        assets.delete_carousel(item["folder"], [c["file"] for c in item["cards"]])
+        st.session_state.gallery_open_carousel = None
+        st.toast("Carousel deleted.")
+        st.rerun()
+
+
 def screen_gallery():
     st.title("Gallery")
-    banners = assets.load_generated_banners()
-    if not banners:
+    items = assets.load_generated_banners()
+    if not items:
         st.info("No banners generated yet.")
         return
 
-    st.caption("Filter past banners by platform, category, and product. Newest first.")
+    # If a carousel is open, show its expanded view and stop.
+    open_cid = st.session_state.get("gallery_open_carousel")
+    if open_cid:
+        item = next(
+            (it for it in items if it.get("type") == "carousel" and it["carousel_id"] == open_cid),
+            None,
+        )
+        if item:
+            _render_open_carousel(item)
+            return
+        st.session_state.gallery_open_carousel = None  # stale — fall through to grid
+
+    st.caption("Filter past creatives by platform, category, and product. Carousels are grouped as one card. Newest first.")
 
     # --- Filters (combine; Category/Product options depend on the ones above) ---
     f1, f2, f3 = st.columns(3)
     with f1:
-        platform_opts = ["All"] + sorted({b["platform"] for b in banners})
+        platform_opts = ["All"] + sorted({it["platform"] for it in items})
         platform_sel = st.selectbox("Platform", platform_opts, key="gal_platform")
 
-    cat_pool = [b for b in banners if platform_sel == "All" or b["platform"] == platform_sel]
-    category_opts = ["All"] + sorted({b["category"] for b in cat_pool})
+    cat_pool = [it for it in items if platform_sel == "All" or it["platform"] == platform_sel]
+    category_opts = ["All"] + sorted({it["category"] for it in cat_pool})
     if st.session_state.get("gal_category") not in category_opts:
         st.session_state["gal_category"] = "All"
     with f2:
         category_sel = st.selectbox("Category", category_opts, key="gal_category")
 
-    prod_pool = [b for b in cat_pool if category_sel == "All" or b["category"] == category_sel]
-    product_opts = ["All"] + sorted({b["product"] for b in prod_pool})
+    prod_pool = [it for it in cat_pool if category_sel == "All" or it["category"] == category_sel]
+    product_set = set()
+    for it in prod_pool:
+        product_set.update(_item_products(it))
+    product_opts = ["All"] + sorted(p for p in product_set if p)
     if st.session_state.get("gal_product") not in product_opts:
         st.session_state["gal_product"] = "All"
     with f3:
         product_sel = st.selectbox("Product", product_opts, key="gal_product")
 
     results = [
-        b for b in prod_pool
-        if product_sel == "All" or b["product"] == product_sel
+        it for it in prod_pool
+        if product_sel == "All" or product_sel in _item_products(it)
     ]
 
     # Reset to page 1 whenever the filter set changes.
@@ -887,9 +1129,9 @@ def screen_gallery():
         st.session_state["gal_filt"] = filt
         st.session_state["gallery_page"] = 0
 
-    st.caption(f"{len(results)} banner{'s' if len(results) != 1 else ''}")
+    st.caption(f"{len(results)} item{'s' if len(results) != 1 else ''}")
     if not results:
-        st.info("No banners match these filters.")
+        st.info("No creatives match these filters.")
         return
 
     total_pages = (len(results) + _GALLERY_PAGE_SIZE - 1) // _GALLERY_PAGE_SIZE
@@ -903,29 +1145,10 @@ def screen_gallery():
         for col, item in zip(cols, page_items[i : i + per_row]):
             with col:
                 with st.container(border=True):
-                    data = assets.load_generated_image(item["folder"], item["file"])
-                    if not data:
-                        st.caption("(image unavailable)")
-                        continue
-                    st.image(data, use_container_width=True)
-                    st.caption(f"{item['product']} · {item['category']}")
-                    st.download_button(
-                        "Download",
-                        data=data,
-                        file_name=item["file"],
-                        mime="image/png",
-                        key=_widget_key("gal_dl", item["folder"], item["file"]),
-                        type="primary",
-                        use_container_width=True,
-                    )
-                    if _confirm_delete(
-                        _widget_key("gal_del", item["folder"], item["file"]),
-                        "Remove this banner?",
-                        label="Remove",
-                    ):
-                        assets.delete_generated_banner(item["folder"], item["file"])
-                        st.toast("Banner removed.")
-                        st.rerun()
+                    if item.get("type") == "carousel":
+                        _render_carousel_card(item)
+                    else:
+                        _render_single_card(item)
 
     if total_pages > 1:
         p1, p2, p3 = st.columns([1, 2, 1])
@@ -938,6 +1161,151 @@ def screen_gallery():
         with p3:
             if page < total_pages - 1 and st.button("Next", key="gallery_next", use_container_width=True):
                 st.session_state.gallery_page = page + 1
+                st.rerun()
+
+
+# ============================================================================
+# SCREEN 1c — DATA LOGGING (CTR)
+# ============================================================================
+def _creative_label(item: dict) -> str:
+    """Short label to identify a creative in the picker."""
+    if item.get("type") == "carousel":
+        products = item.get("products", [])
+        shown = ", ".join(products[:3]) + ("…" if len(products) > 3 else "")
+        tail = f" — {shown}" if shown else ""
+        return f"Carousel · {item['count']} cards · {item['category']}{tail}"
+    return f"{item['product']} · {item['category']}"
+
+
+def screen_data_logging():
+    st.title("Data logging")
+    st.caption(
+        "Log the average CTR for each creative. A creative is whatever ran as one "
+        "ad — a single banner or a whole carousel set (one CTR for the set)."
+    )
+
+    items = assets.load_generated_banners()
+    if not items:
+        st.info("No creatives generated yet.")
+        return
+
+    metrics = assets.load_metrics()
+
+    # --- Select platform, then the creative within it ---
+    platform_opts = sorted({it["platform"] for it in items})
+    platform_sel = st.selectbox("Platform", platform_opts, key="metrics_platform")
+
+    pool = [it for it in items if it["platform"] == platform_sel]
+    if not pool:
+        st.info("No creatives for this platform yet.")
+        return
+
+    creative_idx = st.selectbox(
+        "Creative",
+        list(range(len(pool))),
+        format_func=lambda i: _creative_label(pool[i]),
+        key=_widget_key("metrics_creative", platform_sel),
+    )
+    selected = pool[creative_idx]
+    identity = assets.creative_identity(selected)
+    cid = identity["creative_id"]
+
+    # Thumbnail (single banner, or a carousel's first card) to confirm the pick.
+    if identity.get("thumb_folder") and identity.get("thumb_file"):
+        thumb = assets.load_generated_image(identity["thumb_folder"], identity["thumb_file"])
+        if thumb:
+            st.image(thumb, width=180)
+    type_label = "Carousel set" if identity["type"] == "carousel" else "Single banner"
+    st.caption(f"{type_label} · {identity['label']}")
+
+    existing = metrics.get(cid)
+
+    # Category: default to what the creative's metadata already says (or a
+    # previously logged value), but let the user confirm/correct it. Stored on
+    # the record so category-scoped winner influence can rely on it.
+    known_category = (existing or {}).get("category") or identity.get("category") or ""
+    cat_options = list(assets.load_catalog().keys())
+    if known_category and known_category not in cat_options:
+        cat_options = [known_category] + cat_options
+    if not cat_options:
+        cat_options = [known_category or "Unknown"]
+    default_index = cat_options.index(known_category) if known_category in cat_options else 0
+    category_confirmed = st.selectbox(
+        "Category",
+        cat_options,
+        index=default_index,
+        key=_widget_key("metrics_category", cid),
+        help="Confirm the category — CTR winners only influence generations in the same category.",
+    )
+
+    default_ctr = float(existing.get("ctr", 0.0)) if existing else 0.00
+    if existing:
+        st.caption(f"Currently logged: {default_ctr:.2f}% — saving overwrites it.")
+
+    ctr = st.number_input(
+        "Average CTR (%)",
+        min_value=0.00,
+        max_value=100.00,
+        value=default_ctr,
+        step=0.01,
+        format="%.2f",
+        key=_widget_key("metrics_ctr", cid),
+    )
+    if st.button("Save", type="primary", use_container_width=True):
+        assets.save_metric(cid, {
+            "platform": identity["platform"],
+            "type": identity["type"],
+            "product": identity["product"],
+            "category": category_confirmed,
+            "label": identity["label"],
+            "thumb_folder": identity["thumb_folder"],
+            "thumb_file": identity["thumb_file"],
+            "ctr": round(float(ctr), 2),
+            "logged_at": time.time(),
+        })
+        st.toast("CTR saved.")
+        st.rerun()
+
+    # --- Everything logged so far, newest first, each row editable ---
+    st.divider()
+    st.markdown("**Logged CTRs**")
+    metrics = assets.load_metrics()
+    if not metrics:
+        st.caption("Nothing logged yet.")
+        return
+
+    rows = sorted(metrics.items(), key=lambda kv: kv[1].get("logged_at", 0), reverse=True)
+    head = st.columns([1, 4, 2, 1.5, 2])
+    for col, title in zip(head, ["", "Creative", "Platform", "Type", "CTR (%)"]):
+        col.caption(title)
+    for logged_id, m in rows:
+        c_thumb, c_label, c_plat, c_type, c_ctr = st.columns([1, 4, 2, 1.5, 2])
+        with c_thumb:
+            tf, tfile = m.get("thumb_folder"), m.get("thumb_file")
+            thumb = assets.load_generated_image(tf, tfile) if tf and tfile else None
+            if thumb:
+                st.image(thumb, use_container_width=True)
+        with c_label:
+            st.write(m.get("label") or m.get("product") or logged_id)
+            st.caption(m.get("category", ""))
+        with c_plat:
+            st.write(m.get("platform", ""))
+        with c_type:
+            st.write("Carousel" if m.get("type") == "carousel" else "Single")
+        with c_ctr:
+            new_ctr = st.number_input(
+                "CTR (%)",
+                min_value=0.00,
+                max_value=100.00,
+                value=float(m.get("ctr", 0.0)),
+                step=0.01,
+                format="%.2f",
+                key=_widget_key("metrics_row_ctr", logged_id),
+                label_visibility="collapsed",
+            )
+            if st.button("Update", key=_widget_key("metrics_row_save", logged_id), use_container_width=True):
+                assets.save_metric(logged_id, {**m, "ctr": round(float(new_ctr), 2), "logged_at": time.time()})
+                st.toast("CTR updated.")
                 st.rerun()
 
 
@@ -1641,6 +2009,8 @@ if screen_mode == "Create banner":
     screen_create()
 elif screen_mode == "Gallery":
     screen_gallery()
+elif screen_mode == "Data logging":
+    screen_data_logging()
 elif screen_mode == "Manage Products":
     screen_manage()
 else:

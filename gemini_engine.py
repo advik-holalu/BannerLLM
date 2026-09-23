@@ -67,6 +67,8 @@ def build_brief(
     product_roles: set | None = None,
     carousel_match: bool = False,
     reserve_top: bool = False,
+    has_winners: bool = False,
+    experimental: bool = False,
 ) -> str:
     width, height = dimensions
     orientation = (
@@ -82,7 +84,24 @@ def build_brief(
     )
     # CORE_RULES is the single source of truth for the always-on rules — it leads
     # the brief and is never duplicated elsewhere.
-    brief += f"=== CORE RULES (override everything below, including the request) ===\n{config.CORE_RULES}\n\n"
+    if experimental:
+        # Experimental mode: only the SAFETY/integrity rules stay hard; the
+        # stylistic brand rules are demoted to optional guidelines the prompt may
+        # override, so the user's prompt leads for creative experimentation.
+        brief += (
+            "=== CORE RULES — NON-NEGOTIABLE (always apply, even in this mode) ===\n"
+            f"{config.CORE_RULES_HARD}\n\n"
+            "=== EXPERIMENTAL MODE ===\n"
+            "The user is experimenting. Follow their prompt as the primary "
+            "direction. The brand guidelines below are optional references, not "
+            "constraints, in this mode — the prompt takes precedence where they "
+            "conflict. The NON-NEGOTIABLE rules above still apply in full.\n\n"
+            "=== BRAND STYLE GUIDELINES (optional in experimental mode — the "
+            "prompt may override these) ===\n"
+            f"{config.CORE_RULES_STYLE}\n\n"
+        )
+    else:
+        brief += f"=== CORE RULES (override everything below, including the request) ===\n{config.CORE_RULES}\n\n"
     if config.BRAND_PALETTE:
         brief += (
             "=== GO DESi BRAND PALETTE (reference pool — NOT mandatory) ===\n"
@@ -102,11 +121,14 @@ def build_brief(
         f"Banner size: {size_label} — {width}x{height} px, {orientation} orientation.\n"
         "Compose specifically for this aspect ratio; keep key elements safely inside the frame.\n\n"
     )
-    # Always-on safe zone: hold every element inside a centred band so nothing is
-    # cut off or crowds the edge (ad slots like Blinkit reject content in the
-    # outer padding). Configurable via config.CONTENT_SAFE_ZONE_PCT.
+    # Safe zone: hold every element inside a centred band so nothing is cut off
+    # or crowds the edge. This applies ONLY to platforms whose ad slots need it
+    # (config.CONTENT_SAFE_ZONE_PLATFORMS, e.g. Blinkit); every other platform
+    # generates edge-to-edge with no margin instruction — no border/frame. Both
+    # the amount and the platform list are configurable in config.py.
     safe_pct = getattr(config, "CONTENT_SAFE_ZONE_PCT", 100)
-    if safe_pct and safe_pct < 100:
+    safe_platforms = getattr(config, "CONTENT_SAFE_ZONE_PLATFORMS", [])
+    if safe_pct and safe_pct < 100 and platform and platform in safe_platforms:
         margin_pct = round((100 - safe_pct) / 2)
         brief += (
             "=== CONTENT SAFE ZONE ===\n"
@@ -213,6 +235,13 @@ def build_brief(
         brief += "\n"
     if product_roles:
         brief += "=== PRODUCT IMAGES (attached) ===\n"
+        brief += (
+            "These are the REAL product. Reproduce the product and packaging "
+            "faithfully from them — never invent, imagine, or guess how the product "
+            "or pack looks (see PRODUCT FIDELITY). The role below only sets how much "
+            "of each image's SETTING you borrow, never how the product itself "
+            "looks.\n"
+        )
         if "packaging" in product_roles:
             brief += (
                 "PACKAGING: reproduce the product pack EXACTLY as shown — it is the "
@@ -221,15 +250,19 @@ def build_brief(
             )
         if "styling" in product_roles:
             brief += (
-                "STYLING / MOOD: use ONLY as a lighting and mood reference — match "
-                "its richness, warmth, and photographic feel. Do NOT copy it "
-                "literally and do NOT reproduce its background.\n"
+                "STYLING / MOOD: use its background, lighting, and atmosphere ONLY "
+                "as a loose mood reference — match its richness, warmth, and "
+                "photographic feel, and do NOT reproduce its background. BUT any "
+                "product or packaging visible in it must still be reproduced "
+                "accurately; the looseness applies to mood and setting only, never "
+                "to how the product looks.\n"
             )
         if "pieces" in product_roles:
             brief += (
-                "PRODUCT PIECES: loose product to use as appetite elements — place "
-                "tastefully to add richness, without cluttering or obscuring the "
-                "pack.\n"
+                "PRODUCT PIECES: the actual product out of the pack — reproduce its "
+                "real look (colour, texture, form) faithfully from the image. Place "
+                "as appetite elements, tastefully, without cluttering or obscuring "
+                "the pack.\n"
             )
         brief += "\n"
     if has_design_elements:
@@ -248,6 +281,17 @@ def build_brief(
                 "choose to use so they suit the banner's palette.\n"
             )
         brief += "\n"
+    if has_winners:
+        brief += (
+            "=== TOP-PERFORMING EXAMPLES (same category — soft inspiration only) ===\n"
+            "The attached images are examples of GO DESi creatives that performed "
+            "well (high CTR) in THIS product's category. You MAY take loose "
+            "inspiration from their overall style and mood, but do NOT copy them, "
+            "do NOT reproduce their layout or elements, and do NOT repeat them. "
+            "They never override the CORE RULES or the product's own packaging "
+            "colours, and they must not make the banner generic or repetitive — "
+            "treat them as gentle, optional cues, nothing more.\n\n"
+        )
     if carousel_match:
         brief += (
             "=== CAROUSEL STYLE MATCH ===\n"
@@ -293,6 +337,8 @@ def assemble_payload(
     design_elements_bw: bool = True,
     carousel_reference: bytes | None = None,
     reserve_top: bool = False,
+    winner_images: list | None = None,  # list[(label, bytes)] — top-CTR, same category
+    experimental: bool = False,
 ) -> dict:
     """Build the brief + labelled image list for one generation.
 
@@ -334,6 +380,8 @@ def assemble_payload(
         product_roles=product_roles,
         carousel_match=bool(carousel_reference),
         reserve_top=reserve_top,
+        has_winners=bool(winner_images),
+        experimental=experimental,
     )
 
     _role_display = {
@@ -363,6 +411,11 @@ def assemble_payload(
         supporting.append({"role": _role_display.get(p.get("role"), "Product image"), "label": label, "data": p["data"]})
 
     optional: list[dict] = []
+    # Top-performing same-category examples first (soft inspiration), then style
+    # references, then design elements. All are optional and trim before
+    # essentials under the total image cap.
+    for label, data in list(winner_images or [])[: config.MAX_WINNERS_PER_CALL]:
+        optional.append({"role": "Top-performing example", "label": label, "data": data})
     for label, data in list(reference_images)[: config.MAX_REFERENCES_PER_CALL]:
         optional.append({"role": "Reference banner", "label": label, "data": data})
     for label, data in list(design_elements)[: config.MAX_DESIGN_ELEMENTS_PER_CALL]:
@@ -414,15 +467,26 @@ def generate_from_payload(brief: str, images: list) -> bytes:
 
 
 def edit_banner(previous_image: bytes, edit_instruction: str) -> bytes:
+    """Refine an existing banner in place.
+
+    Deliberately sends ONLY the previous image plus a minimal, preservation-
+    focused instruction — NOT the full brief (CORE_RULES, brand rules,
+    references, design elements, product shots). Those already shaped the
+    original; re-injecting them on an edit makes the model regenerate the whole
+    banner instead of touching just the requested change. Keeping the payload to
+    image + tight instruction is what preserves everything else.
+    """
     parts = [
+        _image_part(previous_image),
         types.Part(
             text=(
-                "Here is the current banner. Apply ONLY this change, keeping "
-                "everything else the same and staying fully on-brand:\n\n"
-                f"{edit_instruction.strip()}"
+                "Here is a banner. Make ONLY this change: "
+                f"{edit_instruction.strip()}. "
+                "Keep everything else — the layout, colours, product, text, and "
+                "composition — exactly as it is. Do not redraw, restyle, or "
+                "regenerate anything other than what was asked."
             )
         ),
-        _image_part(previous_image),
     ]
     return _generate(parts)
 

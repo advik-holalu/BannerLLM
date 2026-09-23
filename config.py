@@ -16,6 +16,13 @@ MODELS = {
 ACTIVE_MODEL = "flash_3_1"
 GEMINI_BASE_URL = "https://generativelanguage.googleapis.com/v1beta/openai/"
 
+# How many carousel banners to generate at once. A carousel of N products used
+# to run one-at-a-time (N x a single banner's time — minutes for a big set).
+# The first banner is still made on its own (it is the style reference the rest
+# match), then the remaining banners are generated this many at a time in
+# parallel. Higher = faster, but too high risks Gemini rate limits (HTTP 429).
+CAROUSEL_MAX_PARALLEL = 4
+
 
 # ============================================================================
 # 2. BANNER SIZES  (label shown in app  ->  pixel dimensions)
@@ -66,9 +73,18 @@ PROMPT_TEMPLATES = {
 # screens — this is the only place these rules live. Rendered in the brief
 # under one "CORE RULES" heading.
 # ============================================================================
-CORE_RULES = (
+# Leads the CORE RULES in NORMAL mode: it is exactly this "prompt is overridden"
+# framing that Experimental mode drops (there, the prompt leads instead).
+_CORE_RULES_OVERRIDE_PREAMBLE = (
     "These override any decorative, \"vibrant\", \"festive\", or \"busy\" "
     "language in the user's prompt.\n\n"
+)
+
+# CORE_RULES_HARD — the genuinely non-negotiable safety/integrity rules. These
+# stay HARD in every mode, including Experimental: never invent offers/claims,
+# never render instruction text, reproduce the real product/pack faithfully,
+# the logo mark is never altered, and provided copy is rendered as given.
+CORE_RULES_HARD = (
     "INSTRUCTION INTEGRITY\n"
     "- Never render any instruction, rule, constraint, or meta-text as visible "
     "text on the banner. The only text on the banner is the copy provided in the "
@@ -78,13 +94,52 @@ CORE_RULES = (
     "packaging (e.g. \"61% Cashew\") as an offer or discount.\n"
     "- Never invent product claims, ingredients, or benefits not stated in the "
     "prompt or visible on the pack.\n\n"
-    "PRODUCT FIDELITY\n"
-    "- Reproduce the product packaging exactly as shown in the reference image. "
-    "Never redraw, restyle, recolour, or alter pack artwork or text.\n"
+    "PRODUCT FIDELITY (NON-NEGOTIABLE)\n"
+    "- The product and its packaging must ALWAYS be reproduced faithfully from the "
+    "uploaded images. Never invent, imagine, redraw, approximate, or generate a "
+    "guessed version of the product or pack — use EXACTLY what is shown in the "
+    "provided images. This overrides any prompt wording; if the prompt describes "
+    "the product differently from the images, the images win.\n"
+    "- This applies to EVERY uploaded product image — packaging shots, "
+    "product-piece shots, any product image — not only the main pack.\n"
+    "- If multiple images of the product are provided, base the product's "
+    "appearance on those images together, never on a generic or imagined version.\n"
+    "- Match the images exactly on ALL of: the pack artwork, text, colours, shape, "
+    "and the actual look of the product/food itself (its real colour, texture, "
+    "form, and finish). Do not stylise or beautify it into something the images "
+    "do not show.\n"
+    "- Image ROLES change ONLY how much of the setting you borrow, never how the "
+    "product looks. An image tagged \"Styling / mood\" may loosely guide "
+    "background, lighting, and atmosphere — but any product or packaging visible "
+    "in it must still be reproduced accurately. The \"loose reference\" applies "
+    "ONLY to mood and setting, never to how the product itself looks. Packaging "
+    "images and product-piece images are reproduced faithfully.\n"
+    "- Never redraw, restyle, recolour, or alter pack artwork or text.\n"
     "- Never obstruct, overlap, or cover any part of the product pack. No props, "
     "gift boxes, ingredients, or graphics in front of or on top of the pack. Show "
     "the pack whole and fully visible, including all callouts, badges, claims, and "
     "disclaimer text printed on it.\n\n"
+    "LOGO\n"
+    "- The GO DESi logo mark is sacred and must NEVER be altered. Reproduce it "
+    "exactly as provided: the wordmark and starburst keep their exact original "
+    "colours (starburst orange #FF8700). Never recolour, restyle, distort, or "
+    "redraw the logo mark.\n"
+    "- Place the GO DESi logo mark cleanly, with no added circle, disc, or shape "
+    "behind it. Reproduce the logo mark exactly as provided; never recolour or "
+    "alter it.\n\n"
+    "COPY RENDERING\n"
+    "- Render the provided copy exactly as given. Do not rewrite, extend, or "
+    "embellish it.\n"
+    "- Render it legibly — it must read at thumbnail size on a phone. Legibility "
+    "beats style.\n"
+    "- Headline font: bold, rounded, friendly sans-serif.\n\n"
+)
+
+# CORE_RULES_STYLE — the STYLISTIC brand rules (pack-is-hero, clean background,
+# 30-40% negative space, energy/tone, no traditional clichés, headline layering).
+# HARD in normal mode; DEMOTED to optional guidelines in Experimental mode, where
+# the user's prompt may override them.
+CORE_RULES_STYLE = (
     "COLOUR\n"
     "- Derive the banner's colour palette primarily FROM THE PRODUCT PACKAGING. "
     "Echo the pack's dominant colours so the banner and the product feel like one "
@@ -120,14 +175,6 @@ CORE_RULES = (
     "and mouth-watering.\n"
     "- Avoid a flat, sticker-like, cut-out look. The pack and pieces should feel "
     "grounded with realistic shadows and depth.\n\n"
-    "LOGO\n"
-    "- The GO DESi logo mark is sacred and must NEVER be altered. Reproduce it "
-    "exactly as provided: the wordmark and starburst keep their exact original "
-    "colours (starburst orange #FF8700). Never recolour, restyle, distort, or "
-    "redraw the logo mark.\n"
-    "- Place the GO DESi logo mark cleanly, with no added circle, disc, or shape "
-    "behind it. Reproduce the logo mark exactly as provided; never recolour or "
-    "alter it.\n\n"
     "THE PHONE TEST\n"
     "- This banner appears small on a phone, scrolled past in under two seconds, "
     "beside competitors. If it doesn't work at thumbnail size, it has failed.\n"
@@ -153,12 +200,6 @@ CORE_RULES = (
     "imagery, no Haldiram's-style traditional sweet-shop aesthetic.\n"
     "- Festivity, when needed, is conveyed through warm colour and playful GO DESi "
     "elements — not through traditional religious or ceremonial motifs.\n\n"
-    "COPY RENDERING\n"
-    "- Render the provided copy exactly as given. Do not rewrite, extend, or "
-    "embellish it.\n"
-    "- Render it legibly — it must read at thumbnail size on a phone. Legibility "
-    "beats style.\n"
-    "- Headline font: bold, rounded, friendly sans-serif.\n\n"
     "HEADLINE STYLING\n"
     "- Render the headline in a dynamic, layered GO DESi style — not one flat "
     "uniform line. Vary weight, size, and style across the lines of the headline "
@@ -176,6 +217,10 @@ CORE_RULES = (
     "- Render the exact copy provided — only the styling/treatment varies, never "
     "the words."
 )
+
+# NORMAL mode injects all of this as one non-negotiable block — same content and
+# behaviour as before (hard rules + style rules, prompt overridden).
+CORE_RULES = _CORE_RULES_OVERRIDE_PREAMBLE + CORE_RULES_HARD + CORE_RULES_STYLE
 
 
 # GO DESi brand palette. A FLEXIBLE reference pool the model may draw from when a
@@ -238,16 +283,23 @@ PLATFORM_FIXED_SIZE = {
 }
 
 # ----------------------------------------------------------------------------
-# CONTENT SAFE ZONE. Every banner keeps all of its content — product, copy,
-# logo, CTA button, design elements — inside a centred zone this wide/tall, as a
+# CONTENT SAFE ZONE. Keeps all of a banner's content — product, copy, logo, CTA
+# button, design elements — inside a centred zone this wide/tall, as a
 # percentage of the frame, leaving a clean background margin all around so
-# nothing important is cut off or crowds the edge (important for ad slots like
+# nothing important is cut off or crowds the edge (needed for ad slots like
 # Blinkit that reject content in the outer padding). This is a brief instruction
 # only (no cropping/compositing): the model is told to hold content inside the
 # central band. 80 => content within the central 80%, i.e. a ~10% margin on
 # each side. Set to 100 to disable the margin.
+#
+# IMPORTANT — this applies ONLY to the platforms listed in
+# CONTENT_SAFE_ZONE_PLATFORMS below. Every other platform (Meta, Zepto, …)
+# generates edge-to-edge with NO margin instruction, so no border/frame appears.
+# Add a platform name to that list to give it the safe-zone margin; leave the
+# list empty to disable the margin everywhere.
 # ----------------------------------------------------------------------------
 CONTENT_SAFE_ZONE_PCT = 80
+CONTENT_SAFE_ZONE_PLATFORMS = ["Blinkit"]
 
 # Platforms whose banners must NOT bake in an Order Now / CTA button — the ad
 # platform supplies its own call-to-action. This is the DEFAULT "no Order Now
@@ -281,6 +333,11 @@ CATALOG_FILE = "brand_assets/catalog.json"
 # ============================================================================
 MAX_REFERENCES_PER_CALL = 3
 MAX_DESIGN_ELEMENTS_PER_CALL = 2
+
+# When "Get influenced by top-performing creatives" is ON, at most this many of
+# the same category's highest-CTR logged creatives are sent as SOFT inspiration.
+# Kept small so winners can never dominate or make output repetitive.
+MAX_WINNERS_PER_CALL = 3
 
 # Hard cap on the TOTAL number of images sent to Gemini in one generation
 # (product shot + logo + platform button + references + design elements).

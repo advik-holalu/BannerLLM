@@ -278,8 +278,8 @@ PLATFORM_FIXED_SIZE = {
     "Meta / Instagram": ("4:5 feed (1080x1350)", (1080, 1350)),
     # Blinkit ad slot: a single fixed 208x520 banner.
     "Blinkit": ("Blinkit banner (208x520)", (208, 520)),
-    # Example: pin Zepto too by filling its exact size:
-    # "Zepto":   ("Zepto banner (WxH)", (1080, 1080)),
+    # Zepto ad slot: a single fixed 1920x1080 landscape banner.
+    "Zepto": ("Zepto banner (1920x1080)", (1920, 1080)),
 }
 
 # ----------------------------------------------------------------------------

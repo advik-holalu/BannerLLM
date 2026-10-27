@@ -1,4 +1,4 @@
-streamlit==1.59.0
+streamlit==1.61.1
 google-genai==2.9.0
 google-cloud-storage==3.13.0
 google-cloud-firestore==2.28.0
